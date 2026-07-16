@@ -48,7 +48,7 @@ export interface ServerGameState {
   roundNumber: number;
   publicState: JsonObject;
   privateStateBySeat: Record<Seat, JsonObject>;
-  actionHistory: GameActionRecord[];
+  actionHistory: JsonValue[];
   version: number;
 }
 
@@ -61,7 +61,7 @@ export interface PlayerGameView {
   roundNumber: number;
   publicState: JsonObject;
   privateState: JsonObject;
-  actionHistory: GameActionRecord[];
+  actionHistory: JsonValue[];
   version: number;
 }
 
