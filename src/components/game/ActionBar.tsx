@@ -7,6 +7,8 @@ import type { Team } from "@/src/lib/game/types";
 import type { Card, DeclaredPlayType } from "@/src/lib/game/types";
 import type { GameActionType } from "@/src/lib/realtime/protocol";
 
+import { TurnCountdownBadge } from "./TurnCountdownBadge";
+
 type PlayOption = {
   type: DeclaredPlayType;
   label: string;
@@ -79,12 +81,13 @@ function ActionButton({
   const variantClassName: Record<"primary" | "secondary" | "play", string> = {
     primary: "bg-[#f8e7a6] text-[#24320f] active:translate-y-px",
     secondary: "border border-[#f8e7a6]/55 bg-[#102c25]/80 text-[#f8e7a6]",
-    play: "w-auto min-w-[72px] max-w-[116px] rounded-full bg-[#d6a33a] px-5 font-black text-white shadow-[0_5px_14px_rgba(0,0,0,0.24)] [-webkit-text-stroke:0.7px_#6b3f1d] active:translate-y-px",
+    play: "w-auto min-w-[58px] max-w-[88px] rounded-full bg-[#d6a33a] px-3 font-black text-white shadow-[0_5px_14px_rgba(0,0,0,0.24)] [-webkit-text-stroke:0.7px_#6b3f1d] active:translate-y-px",
   };
   const sizeClassName =
     variant === "play"
-      ? "h-10"
+      ? "h-8"
       : "h-10 min-w-[104px] rounded-full px-4";
+  const textClassName = variant === "play" ? "text-xs font-black" : "text-sm font-semibold";
 
   return (
     <button
@@ -95,7 +98,8 @@ function ActionButton({
       className={[
         "relative z-50 touch-manipulation",
         sizeClassName,
-        "text-sm font-semibold shadow-sm transition",
+        textClassName,
+        "shadow-sm transition",
         "disabled:cursor-not-allowed disabled:opacity-45",
         variantClassName[variant],
       ].join(" ")}
@@ -130,6 +134,9 @@ export function ActionBar(props: {
   selectedIds: string[];
   bidEnabled: boolean;
   error: string | null;
+  pendingActionType: GameActionType | null;
+  trumpActionPending: boolean;
+  countdownSeconds: number;
   playOptions: PlayOption[];
   submit: (actionType: GameActionType, payload?: unknown) => Promise<void>;
 }) {
@@ -145,6 +152,9 @@ export function ActionBar(props: {
     props.game.allowedActions.requiredReturnTaskId;
   const hint = selectedCountHint(props.game, props.selectedIds.length);
   const playOption = playableOptionForSelection(props.playOptions, props.selected);
+  const canUseTrumpActions =
+    !props.trumpActionPending &&
+    (props.game.allowedActions.canPlaceTrumpBid || props.game.allowedActions.canSkipTrumpBid);
 
   useEffect(() => {
     if (!props.error) {
@@ -165,7 +175,7 @@ export function ActionBar(props: {
   return (
     <div className="pointer-events-auto relative z-40 flex min-h-11 flex-col items-center justify-end gap-1">
       {popupError ? (
-        <div className="absolute bottom-12 left-1/2 z-[70] max-w-[78vw] -translate-x-1/2 rounded-xl border border-[#f6c453]/70 bg-[#2a1c10]/92 px-4 py-2 text-center text-xs font-semibold text-[#fff7d6] shadow-[0_8px_24px_rgba(0,0,0,0.34)]">
+        <div className="absolute bottom-12 left-1/2 z-[70] max-w-[96vw] -translate-x-1/2 whitespace-nowrap rounded-xl border border-[#f6c453]/70 bg-[#2a1c10]/92 px-5 py-2 text-center text-xs font-semibold text-[#fff7d6] shadow-[0_8px_24px_rgba(0,0,0,0.34)]">
           {popupError}
         </div>
       ) : hint ? (
@@ -175,11 +185,11 @@ export function ActionBar(props: {
       ) : null}
 
       <div className="flex max-w-[82vw] items-center justify-center gap-2 overflow-x-auto pb-1">
-        {props.game.phase === "waiting_for_players" ? (
+        {props.game.phase === "waiting_for_players" && !props.game.readyState[ownSeat] ? (
           <ActionButton
-            onClick={() => props.submit("SET_READY", { ready: !props.game.readyState[ownSeat] })}
+            onClick={() => props.submit("SET_READY", { ready: true })}
           >
-            {props.game.readyState[ownSeat] ? "取消准备" : "准备"}
+            准备
           </ActionButton>
         ) : null}
 
@@ -207,7 +217,9 @@ export function ActionBar(props: {
         ) : null}
 
         {props.game.phase === "dealing" ? (
-          <ActionButton onClick={() => props.submit("DEAL_CARDS")}>完成发牌</ActionButton>
+          !props.game.trumpBiddingRound ? (
+            <ActionButton onClick={() => props.submit("DEAL_CARDS")}>继续发牌</ActionButton>
+          ) : null
         ) : null}
 
         {props.game.phase === "heavenly_trump_bidding" ? (
@@ -230,19 +242,26 @@ export function ActionBar(props: {
           )
         ) : null}
 
-        {props.game.phase === "dealing" || props.game.phase === "final_trump_bidding" ? (
-          <>
+        {(props.game.phase === "dealing" || props.game.phase === "final_trump_bidding") &&
+        props.game.trumpBiddingRound &&
+        canUseTrumpActions ? (
+          <div className="flex items-center gap-1.5">
+            <TurnCountdownBadge seconds={props.countdownSeconds} size="compact" />
             <ActionButton
-              disabled={!props.bidEnabled}
+              disabled={!props.game.allowedActions.canPlaceTrumpBid || !props.bidEnabled}
               title={props.bidEnabled ? undefined : "请选择 1 至 4 张同花色的 2"}
               onClick={() => props.submit("PLACE_TRUMP_BID", { cardIds: props.selectedIds })}
             >
               摔 2
             </ActionButton>
-            <ActionButton variant="secondary" onClick={() => props.submit("RESOLVE_TRUMP")}>
-              定主
+            <ActionButton
+              variant="secondary"
+              disabled={!props.game.allowedActions.canSkipTrumpBid}
+              onClick={() => props.submit("SKIP_TRUMP_BID")}
+            >
+              跳过
             </ActionButton>
-          </>
+          </div>
         ) : null}
 
         {props.game.phase === "tribute" && tributeAction && tributeTaskId ? (
@@ -275,30 +294,34 @@ export function ActionBar(props: {
             >
               扣底
             </ActionButton>
-          ) : (
-            <span className="rounded-full bg-[#102c25]/80 px-3 py-2 text-xs text-[#f8fff4]/85">
-              等待扣底
-            </span>
-          )
+          ) : null
         ) : null}
 
         {props.game.phase === "playing" ? (
           props.game.allowedActions.canPlayCards ? (
-            <ActionButton
-              variant="play"
-              disabled={!playOption || playOption.disabled || props.selectedIds.length === 0}
-              title={!playOption ? "请选择要出的牌" : playOption.disabled ? playOption.reason : undefined}
-              onClick={() =>
-                playOption
-                  ? props.submit("PLAY_CARDS", {
-                      cardIds: props.selectedIds,
-                      declaredType: playOption.type,
-                    })
-                  : Promise.resolve()
-              }
-            >
-              出牌
-            </ActionButton>
+            <div className="flex items-center gap-1.5">
+              <TurnCountdownBadge seconds={props.countdownSeconds} size="compact" />
+              <ActionButton
+                variant="play"
+                disabled={
+                  props.pendingActionType === "PLAY_CARDS" ||
+                  !playOption ||
+                  playOption.disabled ||
+                  props.selectedIds.length === 0
+                }
+                title={!playOption ? "请选择要出的牌" : playOption.disabled ? playOption.reason : undefined}
+                onClick={() =>
+                  playOption
+                    ? props.submit("PLAY_CARDS", {
+                        cardIds: props.selectedIds,
+                        declaredType: playOption.type,
+                      })
+                    : Promise.resolve()
+                }
+              >
+                出牌
+              </ActionButton>
+            </div>
           ) : null
         ) : null}
       </div>

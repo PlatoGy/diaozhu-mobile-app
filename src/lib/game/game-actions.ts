@@ -6,6 +6,7 @@ import {
   placeTrumpBid,
   resolveHeavenlyTrump,
   resolveFinalTrumpBidding,
+  skipTrumpBid,
   startRound,
   takeBottomCards,
 } from "./round";
@@ -405,9 +406,44 @@ function applyActionToState(
     result: RoundState | ServerGameActionError,
   ): ServerGameState | ServerGameActionError =>
     "code" in result ? result : toServerGameState(state, result, actionType);
+  const pendingTributeCount =
+    roundState.pendingTributeCount ?? state.betweenRounds?.tributeCount ?? 0;
+  const nextStateAfterTrumpLock = (
+    result: RoundState | ServerGameActionError,
+  ): ServerGameState | ServerGameActionError => {
+    if ("code" in result) {
+      return result;
+    }
+
+    if (result.phase === "tribute" && pendingTributeCount > 0 && !result.tributeState) {
+      return nextStateFromRound(
+        executeRuleResult(
+          enterTributePhase(result, {
+            totalTributes: pendingTributeCount,
+          }),
+        ),
+      );
+    }
+
+    if (result.phase === "taking_bottom" && pendingTributeCount === 0) {
+      return nextStateFromRound({
+        ...result,
+        pendingTributeCount: 0,
+        tributeState: null,
+      });
+    }
+
+    return nextStateFromRound(result);
+  };
 
   if (actionType === "DEAL_CARDS") {
-    return nextStateFromRound(executeRuleResult(dealCards(roundState)));
+    return nextStateAfterTrumpLock(
+      executeRuleResult(
+        dealCards(roundState, {
+          hasPendingTribute: pendingTributeCount > 0,
+        }),
+      ),
+    );
   }
 
   if (actionType === "PLACE_TRUMP_BID") {
@@ -420,13 +456,25 @@ function applyActionToState(
     const result = placeTrumpBid(roundState, {
       seat,
       cardIds: parsed.cardIds,
+      hasPendingTribute: pendingTributeCount > 0,
     });
 
     if (!result.ok) {
       return ruleError(result.error);
     }
 
-    return nextStateFromRound(result.value.state);
+    return nextStateAfterTrumpLock(result.value.state);
+  }
+
+  if (actionType === "SKIP_TRUMP_BID") {
+    return nextStateAfterTrumpLock(
+      executeRuleResult(
+        skipTrumpBid(roundState, {
+          seat,
+          hasPendingTribute: pendingTributeCount > 0,
+        }),
+      ),
+    );
   }
 
   if (actionType === "RESOLVE_HEAVENLY_TRUMP") {
@@ -442,8 +490,6 @@ function applyActionToState(
   }
 
   if (actionType === "RESOLVE_TRUMP") {
-    const pendingTributeCount =
-      roundState.pendingTributeCount ?? state.betweenRounds?.tributeCount ?? 0;
     const resolvedTrump = resolveFinalTrumpBidding(roundState, {
       hasPendingTribute: pendingTributeCount > 0,
     });

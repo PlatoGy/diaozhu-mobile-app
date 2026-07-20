@@ -11,6 +11,7 @@ import {
   resolveDealerSelection,
   resolveFinalTrumpBidding,
   resolveHeavenlyTrump,
+  skipTrumpBid,
   startRound,
   takeBottomCards,
 } from "./round";
@@ -66,6 +67,36 @@ function findCards(
     .slice(0, count);
 }
 
+function createHandsWithSeatCards(seat: Seat, cards: readonly Card[], handSize: number) {
+  const deck = createDeck();
+  const assignedIds = new Set(cards.map((card) => card.id));
+  const filler = deck.filter((card) => !assignedIds.has(card.id));
+  const hands = createEmptyHands();
+  let fillerIndex = 0;
+
+  for (const currentSeat of [0, 1, 2, 3] as const satisfies readonly Seat[]) {
+    const requiredCards = currentSeat === seat ? [...cards] : [];
+
+    while (requiredCards.length < handSize) {
+      const fillerCard = filler[fillerIndex];
+
+      if (!fillerCard) {
+        throw new Error("Not enough filler cards for test hand");
+      }
+
+      requiredCards.push(fillerCard);
+      fillerIndex += 1;
+    }
+
+    hands[currentSeat] = requiredCards;
+  }
+
+  return {
+    hands,
+    drawPile: filler.slice(fillerIndex),
+  };
+}
+
 function baseRoundState(overrides: Partial<RoundState> = {}): RoundState {
   return {
     roundNumber: 2,
@@ -110,18 +141,72 @@ function dealtTakingBottomState(): RoundState {
       random: () => 0.5,
     }),
   );
-  const dealt = expectOk(dealCards(started));
+  const dealt = dealToFinalBidding(started);
 
   return {
     ...dealt,
     phase: "taking_bottom",
     trumpSuit: "hearts",
     dealerSeat: 0,
+    trumpBiddingRound: null,
   };
 }
 
+function skipPendingTrumpBids(state: RoundState): RoundState {
+  let current = state;
+
+  for (const seat of [0, 1, 2, 3] as const satisfies readonly Seat[]) {
+    const response = current.trumpBiddingRound?.responses[seat];
+
+    if (
+      (current.phase === "dealing" || current.phase === "final_trump_bidding") &&
+      response?.type === "pending"
+    ) {
+      current = expectOk(skipTrumpBid(current, { seat }));
+    }
+  }
+
+  return current;
+}
+
+function resolveHeavenlyPromptIfNeeded(state: RoundState): RoundState {
+  const prompt = state.heavenlyTrumpPrompt;
+
+  if (state.phase !== "heavenly_trump_bidding" || !prompt || prompt.resolved) {
+    return state;
+  }
+
+  return expectOk(resolveHeavenlyTrump(state, { seat: prompt.seat, accept: false }));
+}
+
+function dealToFinalBidding(state: RoundState): RoundState {
+  let current = expectOk(dealCards(state));
+
+  for (let guard = 0; guard < 16; guard += 1) {
+    current = resolveHeavenlyPromptIfNeeded(current);
+
+    if (current.phase === "final_trump_bidding") {
+      return current;
+    }
+
+    if (current.phase === "dealing" && current.trumpBiddingRound) {
+      current = skipPendingTrumpBids(current);
+      continue;
+    }
+
+    if (current.phase === "dealing") {
+      current = expectOk(dealCards(current));
+      continue;
+    }
+
+    break;
+  }
+
+  throw new Error(`Expected final trump bidding, got ${current.phase}`);
+}
+
 describe("dealing", () => {
-  it("deals all 216 cards into four 52-card hands and 8 bottom cards", () => {
+  it("deals the first card to each player and asks the first 2 holder about heavenly trump", () => {
     const started = expectOk(startRound({ roundNumber: 1, random: () => 0.5 }));
     const dealt = expectOk(dealCards(started));
     const allAssignedCards = [
@@ -134,36 +219,62 @@ describe("dealing", () => {
     const allAssignedIds = new Set(allAssignedCards.map((card) => card.id));
 
     const firstTwoIndex = started.drawPile
-      .slice(0, 208)
+      .slice(0, 4)
       .findIndex((card) => card.rank === "2" && card.originalSuit !== "joker");
     const firstTwo = started.drawPile[firstTwoIndex];
 
-    expect(dealt.phase).toBe("heavenly_trump_bidding");
-    expect(dealt.heavenlyTrumpPrompt).toEqual({
-      seat: (firstTwoIndex % 4) as Seat,
-      cardId: firstTwo?.id,
-      suit: firstTwo?.originalSuit,
-      resolved: false,
-    });
+    if (firstTwoIndex >= 0 && firstTwo?.originalSuit !== "joker") {
+      expect(dealt.phase).toBe("heavenly_trump_bidding");
+      expect(dealt.heavenlyTrumpPrompt).toEqual({
+        seat: (firstTwoIndex % 4) as Seat,
+        cardId: firstTwo.id,
+        suit: firstTwo.originalSuit,
+        resolved: false,
+      });
+    }
+
+    expect(dealt.hands[0]).toHaveLength(1);
+    expect(dealt.hands[1]).toHaveLength(1);
+    expect(dealt.hands[2]).toHaveLength(1);
+    expect(dealt.hands[3]).toHaveLength(1);
+    expect(dealt.bottomCards).toHaveLength(0);
+    expect(allAssignedCards).toHaveLength(4);
+    expect(allAssignedIds.size).toBe(4);
+    expect(dealt.drawPile).toHaveLength(212);
+    expect(dealt.dealOrder).toHaveLength(4);
+    expect(dealt.dealOrder.map((item) => item.seat)).toEqual([0, 1, 2, 3]);
+  });
+
+  it("deals the remaining cards as three 17-card batches after bidding rounds finish", () => {
+    const started = expectOk(startRound({ roundNumber: 1, random: () => 0.5 }));
+    const dealt = dealToFinalBidding(started);
+    const allAssignedCards = [
+      ...dealt.hands[0],
+      ...dealt.hands[1],
+      ...dealt.hands[2],
+      ...dealt.hands[3],
+      ...dealt.bottomCards,
+    ];
+
+    expect(dealt.phase).toBe("final_trump_bidding");
+    expect(dealt.trumpBiddingRound?.batchNumber).toBe(4);
+    expect(dealt.trumpBiddingRound?.cardsPerPlayerDealt).toBe(52);
     expect(dealt.hands[0]).toHaveLength(52);
     expect(dealt.hands[1]).toHaveLength(52);
     expect(dealt.hands[2]).toHaveLength(52);
     expect(dealt.hands[3]).toHaveLength(52);
     expect(dealt.bottomCards).toHaveLength(8);
-    expect(allAssignedCards).toHaveLength(216);
-    expect(allAssignedIds.size).toBe(216);
     expect(dealt.drawPile).toHaveLength(0);
-    expect(dealt.dealOrder).toHaveLength(208);
-    expect(dealt.dealOrder.slice(0, 8).map((item) => item.seat)).toEqual([
-      0, 1, 2, 3, 0, 1, 2, 3,
-    ]);
+    expect(allAssignedCards).toHaveLength(216);
+    expect(new Set(allAssignedCards.map((card) => card.id)).size).toBe(216);
   });
 
-  it("does not deal a round twice", () => {
-    const started = expectOk(startRound({ roundNumber: 1 }));
+  it("does not deal while the current bidding round is unresolved", () => {
+    const started = expectOk(startRound({ roundNumber: 1, random: () => 0.5 }));
     const dealt = expectOk(dealCards(started));
+    const bidding = resolveHeavenlyPromptIfNeeded(dealt);
 
-    expectErrorCode(dealCards({ ...dealt, phase: "dealing" }), "ROUND_ALREADY_STARTED");
+    expectErrorCode(dealCards({ ...bidding, phase: "dealing" }), "ROUND_ALREADY_STARTED");
   });
 
   it("allows the first player who received a 2 to accept or skip heavenly trump", () => {
@@ -182,18 +293,24 @@ describe("dealing", () => {
 
     const accepted = expectOk(resolveHeavenlyTrump(dealt, { seat: prompt.seat, accept: true }));
 
-    expect(accepted.phase).toBe("final_trump_bidding");
+    expect(accepted.phase).toBe("dealing");
     expect(accepted.highestTrumpBid).toEqual({
       seat: prompt.seat,
       suit: prompt.suit,
       count: 3,
+      cardIds: [prompt.cardId],
       isHeavenly: true,
+    });
+    expect(accepted.trumpBiddingRound?.responses[prompt.seat]).toEqual({
+      type: "bid",
+      bid: accepted.highestTrumpBid,
     });
 
     const skipped = expectOk(resolveHeavenlyTrump(dealt, { seat: prompt.seat, accept: false }));
 
-    expect(skipped.phase).toBe("final_trump_bidding");
+    expect(skipped.phase).toBe("dealing");
     expect(skipped.highestTrumpBid).toBeNull();
+    expect(skipped.trumpBiddingRound?.responses[prompt.seat]).toEqual({ type: "skipped" });
   });
 });
 
@@ -266,6 +383,7 @@ describe("trump bidding", () => {
       seat: 0,
       suit: "spades",
       count: 2,
+      cardIds: spadeTwos.map((card) => card.id),
     });
   });
 
@@ -297,6 +415,118 @@ describe("trump bidding", () => {
     expect(secondBid.highestTrumpBid.count).toBe(2);
   });
 
+  it("invalidates previous skips when a new highest trump bid is placed", () => {
+    const deck = createDeck();
+    const heartTwo = findCard(deck, "hearts", "2");
+    const hands = createEmptyHands();
+    hands[1] = [heartTwo];
+    const state = baseRoundState({
+      phase: "dealing",
+      hands,
+      trumpBiddingRound: {
+        batchNumber: 1,
+        cardsPerPlayerDealt: 1,
+        responses: {
+          0: { type: "skipped" },
+          1: { type: "pending" },
+          2: { type: "skipped" },
+          3: { type: "pending" },
+        },
+      },
+    });
+
+    const bid = expectOk(placeTrumpBid(state, { seat: 1, cardIds: [heartTwo.id] })).state;
+
+    expect(bid.trumpBiddingRound?.responses[0]).toEqual({ type: "pending" });
+    expect(bid.trumpBiddingRound?.responses[1]).toEqual({
+      type: "bid",
+      bid: {
+        seat: 1,
+        suit: "hearts",
+        count: 1,
+        cardIds: [heartTwo.id],
+      },
+    });
+    expect(bid.trumpBiddingRound?.responses[2]).toEqual({ type: "pending" });
+    expect(bid.trumpBiddingRound?.responses[3]).toEqual({ type: "pending" });
+  });
+
+  it("locks trump immediately when a player bids four same-suit 2s", () => {
+    const deck = createDeck();
+    const spadeTwos = findCards(deck, "spades", "2", 4);
+    const { hands, drawPile } = createHandsWithSeatCards(2, spadeTwos, 52);
+    const state = baseRoundState({
+      roundNumber: 1,
+      phase: "final_trump_bidding",
+      dealerSeat: null,
+      hands,
+      bottomCards: drawPile.slice(0, 8),
+      drawPile: [],
+      trumpBiddingRound: {
+        batchNumber: 4,
+        cardsPerPlayerDealt: 52,
+        responses: {
+          0: { type: "skipped" },
+          1: { type: "pending" },
+          2: { type: "pending" },
+          3: { type: "pending" },
+        },
+      },
+    });
+
+    const bid = expectOk(
+      placeTrumpBid(state, {
+        seat: 2,
+        cardIds: spadeTwos.map((card) => card.id),
+      }),
+    ).state;
+
+    expect(bid.phase).toBe("taking_bottom");
+    expect(bid.dealerSeat).toBe(2);
+    expect(bid.trumpSuit).toBe("spades");
+    expect(bid.trumpBiddingRound).toBeNull();
+  });
+
+  it("continues later deal batches without more bidding prompts after trump is locked by four 2s", () => {
+    const deck = createDeck();
+    const clubTwos = findCards(deck, "clubs", "2", 4);
+    const { hands, drawPile } = createHandsWithSeatCards(0, clubTwos, 18);
+    const state = baseRoundState({
+      phase: "dealing",
+      hands,
+      drawPile,
+      trumpBiddingRound: {
+        batchNumber: 2,
+        cardsPerPlayerDealt: 18,
+        responses: {
+          0: { type: "pending" },
+          1: { type: "skipped" },
+          2: { type: "skipped" },
+          3: { type: "skipped" },
+        },
+      },
+    });
+
+    const locked = expectOk(
+      placeTrumpBid(state, {
+        seat: 0,
+        cardIds: clubTwos.map((card) => card.id),
+      }),
+    ).state;
+    const thirdBatch = expectOk(dealCards(locked));
+    const fourthBatch = expectOk(dealCards(thirdBatch));
+
+    expect(locked.phase).toBe("dealing");
+    expect(locked.trumpSuit).toBe("clubs");
+    expect(locked.trumpBiddingRound).toBeNull();
+    expect(thirdBatch.hands[0]).toHaveLength(35);
+    expect(thirdBatch.trumpBiddingRound).toBeNull();
+    expect(fourthBatch.phase).toBe("taking_bottom");
+    expect(fourthBatch.hands[0]).toHaveLength(52);
+    expect(fourthBatch.bottomCards).toHaveLength(8);
+    expect(fourthBatch.trumpBiddingRound).toBeNull();
+  });
+
   it("treats heavenly trump as 3 twos and does not allow the bidder to increase it", () => {
     const deck = createDeck();
     const spadeTwos = findCards(deck, "spades", "2", 4);
@@ -311,6 +541,7 @@ describe("trump bidding", () => {
         seat: 0,
         suit: "spades",
         count: 3,
+        cardIds: [spadeTwos[0]?.id ?? ""],
         isHeavenly: true,
       },
     });
@@ -332,6 +563,7 @@ describe("trump bidding", () => {
       seat: 1,
       suit: "hearts",
       count: 4,
+      cardIds: heartTwos.map((card) => card.id),
     });
   });
 });

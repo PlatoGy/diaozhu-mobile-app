@@ -54,6 +54,7 @@ const trumpBidSchema = z
     seat: seatSchema,
     suit: standardSuitSchema,
     count: z.union([z.literal(1), z.literal(2), z.literal(3), z.literal(4)]),
+    cardIds: z.array(z.string().min(1)).optional().default([]),
     isHeavenly: z.literal(true).optional(),
   })
   .strict();

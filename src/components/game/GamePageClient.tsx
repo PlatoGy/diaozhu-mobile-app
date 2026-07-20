@@ -3,6 +3,16 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 
 import { useGameRoomState } from "@/src/lib/client/use-game-room-state";
+import { useActionCountdown } from "@/src/lib/client/use-action-countdown";
+import {
+  applyOptimisticEffectsToView,
+  hasOptimisticEffect,
+  mergeOptimisticSlotMessages,
+  optimisticSlotCards,
+  removeOptimisticEffectByRequestId,
+  type OptimisticGameEffect,
+} from "@/src/lib/client/optimistic-effects";
+import { nowMs } from "@/src/lib/client/action-performance";
 import { sortHandForDisplay } from "@/src/lib/game/display";
 import { getDisabledFollowCardIds } from "@/src/lib/game/follow-selection";
 import type { PlayerGameStateView } from "@/src/lib/game/player-view";
@@ -14,19 +24,19 @@ import type {
   GroupType,
   LeadPrivileges,
   PlayCategory,
-  ResolvedTrick,
   Seat,
   StandardSuit,
+  TrumpBiddingResponse,
 } from "@/src/lib/game/types";
 import type { GameActionType } from "@/src/lib/realtime/protocol";
 
 import { ActionBar } from "./ActionBar";
-import { CentralTrickArea } from "./CentralTrickArea";
+import { CentralTrickArea, type TrickSlotMessage } from "./CentralTrickArea";
 import { MissingSuitsPanel, PlayerBadge, type PlayerMissingMarks } from "./PlayerBadge";
 import { PlayerHand } from "./PlayerHand";
 import { PortraitOrientationOverlay } from "./PortraitOrientationOverlay";
 import { RoundResultPanel } from "./RoundResultPanel";
-import { CornerGameInfo, SUIT_LABELS, TopStatusBar, phaseLabel } from "./TopStatusBar";
+import { CornerGameInfo, TopStatusBar, phaseLabel } from "./TopStatusBar";
 
 type GamePageClientProps = {
   roomId: string;
@@ -46,6 +56,62 @@ function selectedCards(hand: readonly Card[], selectedCardIds: readonly string[]
   });
 }
 
+const PLAY_DECLARATIONS = new Set<DeclaredPlayType>([
+  "single",
+  "pair",
+  "triple",
+  "quad",
+  "loose",
+]);
+
+const SUIT_SYMBOLS: Record<StandardSuit, string> = {
+  spades: "♠",
+  hearts: "♥",
+  clubs: "♣",
+  diamonds: "♦",
+};
+
+function playCardsPayload(
+  payload: unknown,
+): { cardIds: string[]; declaredType: DeclaredPlayType } | null {
+  if (!payload || typeof payload !== "object") {
+    return null;
+  }
+
+  const record = payload as Record<string, unknown>;
+
+  if (
+    !Array.isArray(record.cardIds) ||
+    !record.cardIds.every((cardId) => typeof cardId === "string") ||
+    typeof record.declaredType !== "string" ||
+    !PLAY_DECLARATIONS.has(record.declaredType as DeclaredPlayType)
+  ) {
+    return null;
+  }
+
+  return {
+    cardIds: record.cardIds,
+    declaredType: record.declaredType as DeclaredPlayType,
+  };
+}
+
+function cardIdsPayload(payload: unknown): string[] | null {
+  if (!payload || typeof payload !== "object") {
+    return null;
+  }
+
+  const record = payload as Record<string, unknown>;
+
+  if (
+    !Array.isArray(record.cardIds) ||
+    !record.cardIds.every((cardId) => typeof cardId === "string")
+  ) {
+    return null;
+  }
+
+  return record.cardIds;
+}
+
 function canBidTwos(cards: readonly Card[]): boolean {
   if (cards.length < 1 || cards.length > 4) {
     return false;
@@ -58,6 +124,31 @@ function canBidTwos(cards: readonly Card[]): boolean {
       first.originalSuit !== "joker" &&
       cards.every((card) => card.rank === "2" && card.originalSuit === first.originalSuit),
   );
+}
+
+function trumpBidResponseFromSelection(
+  seat: Seat,
+  cards: readonly Card[],
+): TrumpBiddingResponse | null {
+  if (!canBidTwos(cards)) {
+    return null;
+  }
+
+  const first = cards[0];
+
+  if (!first || first.originalSuit === "joker") {
+    return null;
+  }
+
+  return {
+    type: "bid",
+    bid: {
+      seat,
+      suit: first.originalSuit,
+      count: cards.length as 1 | 2 | 3 | 4,
+      cardIds: cards.map((card) => card.id),
+    },
+  };
 }
 
 function declaredTypeOptions(
@@ -141,10 +232,6 @@ function hasPrivilege(
   return true;
 }
 
-function latestResolvedTrick(history: readonly ResolvedTrick[]): ResolvedTrick | null {
-  return history[history.length - 1] ?? null;
-}
-
 type MissingMarksBySeat = Partial<Record<Seat, PlayerMissingMarks>>;
 
 function addMissingMark(
@@ -177,18 +264,95 @@ function buildMissingMarks(game: PlayerGameStateView): MissingMarksBySeat {
   return marks;
 }
 
+function trumpBiddingMessage(response: TrumpBiddingResponse): TrickSlotMessage | null {
+  if (response.type === "skipped") {
+    return {
+      text: "跳过",
+      tone: "skip",
+    };
+  }
+
+  if (response.type === "bid") {
+    return {
+      text: `${response.bid.isHeavenly ? "天摔" : "摔2"} ${SUIT_SYMBOLS[response.bid.suit]}×${response.bid.count}`,
+      tone: "bid",
+    };
+  }
+
+  return null;
+}
+
+function buildTrumpBiddingMessages(
+  game: PlayerGameStateView,
+): Partial<Record<Seat, TrickSlotMessage>> {
+  const messages: Partial<Record<Seat, TrickSlotMessage>> = {};
+  const responses = game.trumpBiddingRound?.responses;
+
+  if (!responses) {
+    return messages;
+  }
+
+  for (const seat of [0, 1, 2, 3] as const satisfies readonly Seat[]) {
+    const message = trumpBiddingMessage(responses[seat]);
+
+    if (message) {
+      messages[seat] = message;
+    }
+  }
+
+  return messages;
+}
+
+function buildReadyMessages(game: PlayerGameStateView): Partial<Record<Seat, TrickSlotMessage>> {
+  if (game.phase !== "waiting_for_players") {
+    return {};
+  }
+
+  const messages: Partial<Record<Seat, TrickSlotMessage>> = {};
+
+  for (const seat of [0, 1, 2, 3] as const satisfies readonly Seat[]) {
+    if (game.readyState[seat]) {
+      messages[seat] = {
+        text: "已准备",
+        tone: "ready",
+      };
+    }
+  }
+
+  return messages;
+}
+
+function buildTrumpBidCards(game: PlayerGameStateView): Partial<Record<Seat, Card[]>> {
+  if (
+    !game.highestTrumpBid ||
+    game.highestTrumpBidCards.length === 0 ||
+    (game.phase !== "dealing" && game.phase !== "final_trump_bidding")
+  ) {
+    return {};
+  }
+
+  return {
+    [game.highestTrumpBid.seat]: game.highestTrumpBidCards,
+  };
+}
+
 export function GamePageClient({ roomId, playerToken }: GamePageClientProps) {
-  const { view, loading, error, connectionStatus, submitAction } = useGameRoomState({
+  const { view, loading, error, connectionStatus, pendingAction, refresh, submitAction } = useGameRoomState({
     roomId,
     playerToken,
   });
   const [selectedCardIds, setSelectedCardIds] = useState<string[]>([]);
-  const [overlayTrick, setOverlayTrick] = useState<ResolvedTrick | null>(null);
-  const seenTrickNumberRef = useRef<number | null>(null);
-  const overlayTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [optimisticEffects, setOptimisticEffects] = useState<OptimisticGameEffect[]>([]);
+  const playSubmitInFlightRef = useRef(false);
+  const trumpSubmitInFlightRef = useRef(false);
+  const readySubmitInFlightRef = useRef(false);
 
   const state = view;
-  const game = state?.game;
+  const authoritativeGame = state?.game;
+  const game = useMemo(
+    () => (authoritativeGame ? applyOptimisticEffectsToView(authoritativeGame, optimisticEffects) : null),
+    [authoritativeGame, optimisticEffects],
+  );
   const hand = useMemo(() => game?.ownHand ?? [], [game?.ownHand]);
   const trumpSuit = game?.trumpSuit ?? null;
   const provisionalTrumpSuit = game?.highestTrumpBid?.suit ?? null;
@@ -217,6 +381,47 @@ export function GamePageClient({ roomId, playerToken }: GamePageClientProps) {
       ),
     });
   }, [game, hand]);
+  const turnCountdownKey =
+    game?.phase === "playing" && game.currentTrick?.status === "in_progress"
+      ? `${game.currentTrick.trickNumber}:${game.currentTrick.currentTurnSeat}:${game.currentTrick.plays.length}`
+      : null;
+  const trumpBiddingRound = game?.trumpBiddingRound ?? null;
+  const trumpActionPending = hasOptimisticEffect(
+    optimisticEffects,
+    (effect) => effect.kind === "slot_message" && Boolean(effect.hidesTrumpActions),
+  );
+  const pendingTrumpSeats = useMemo(() => {
+    if (
+      !game ||
+      !trumpBiddingRound ||
+      (game.phase !== "dealing" && game.phase !== "final_trump_bidding")
+    ) {
+      return [];
+    }
+
+    return ([0, 1, 2, 3] as const satisfies readonly Seat[]).filter(
+      (seat) =>
+        trumpBiddingRound.responses[seat].type === "pending" &&
+        !(seat === game.viewerSeat && trumpActionPending),
+    );
+  }, [game, trumpActionPending, trumpBiddingRound]);
+  const trumpCountdownKey =
+    game && trumpBiddingRound && pendingTrumpSeats.length > 0
+      ? [
+          "trump",
+          game.phase,
+          trumpBiddingRound.batchNumber,
+          trumpBiddingRound.cardsPerPlayerDealt,
+          game.highestTrumpBid?.seat ?? "none",
+          game.highestTrumpBid?.suit ?? "none",
+          game.highestTrumpBid?.count ?? 0,
+          pendingTrumpSeats.join(","),
+        ].join(":")
+      : null;
+  const countdownSeconds = useActionCountdown({
+    key: turnCountdownKey ?? trumpCountdownKey,
+    durationSeconds: 15,
+  });
 
   useEffect(() => {
     const handIds = new Set(hand.map((card) => card.id));
@@ -240,48 +445,197 @@ export function GamePageClient({ roomId, playerToken }: GamePageClientProps) {
     setSelectedCardIds((current) => current.filter((cardId) => !disabled.has(cardId)));
   }, [disabledFollowCardIds]);
 
-  useEffect(() => {
-    if (!game) {
-      return;
-    }
-
-    const latest = latestResolvedTrick(game.trickHistory);
-
-    if (!latest) {
-      return;
-    }
-
-    if (seenTrickNumberRef.current === null) {
-      seenTrickNumberRef.current = latest.trickNumber;
-      return;
-    }
-
-    if (latest.trickNumber <= seenTrickNumberRef.current) {
-      return;
-    }
-
-    seenTrickNumberRef.current = latest.trickNumber;
-    setOverlayTrick(latest);
-
-    if (overlayTimerRef.current) {
-      clearTimeout(overlayTimerRef.current);
-    }
-
-    overlayTimerRef.current = setTimeout(() => {
-      setOverlayTrick(null);
-    }, 1000);
-  }, [game]);
-
-  useEffect(
-    () => () => {
-      if (overlayTimerRef.current) {
-        clearTimeout(overlayTimerRef.current);
-      }
-    },
-    [],
-  );
-
   async function submit(actionType: GameActionType, payload: unknown = {}) {
+    if (actionType === "SET_READY") {
+      if (
+        !authoritativeGame ||
+        hasOptimisticEffect(optimisticEffects, (effect) => effect.kind === "ready") ||
+        pendingAction ||
+        readySubmitInFlightRef.current
+      ) {
+        return;
+      }
+
+      const requestId = crypto.randomUUID();
+      const optimisticEffect: OptimisticGameEffect = {
+        kind: "ready",
+        requestId,
+        seat: authoritativeGame.viewerSeat,
+      };
+      readySubmitInFlightRef.current = true;
+      setOptimisticEffects((current) => [...current, optimisticEffect]);
+
+      let result: PlayerGameStateView | null = null;
+
+      try {
+        result = await submitAction({ actionType, payload, requestId });
+      } finally {
+        setOptimisticEffects((current) =>
+          removeOptimisticEffectByRequestId(current, requestId),
+        );
+        readySubmitInFlightRef.current = false;
+      }
+
+      if (!result) {
+        void refresh();
+      }
+      return;
+    }
+
+    if (actionType === "PLAY_CARDS") {
+      if (
+        !authoritativeGame ||
+        hasOptimisticEffect(optimisticEffects, (effect) => effect.kind === "play_cards") ||
+        pendingAction ||
+        playSubmitInFlightRef.current
+      ) {
+        return;
+      }
+
+      const parsedPayload = playCardsPayload(payload);
+
+      if (!parsedPayload) {
+        return;
+      }
+
+      const cardsToPlay = selectedCards(authoritativeGame.ownHand, parsedPayload.cardIds);
+
+      if (cardsToPlay.length !== parsedPayload.cardIds.length) {
+        return;
+      }
+
+      const requestId = crypto.randomUUID();
+      playSubmitInFlightRef.current = true;
+      const optimisticEffect: OptimisticGameEffect = {
+        kind: "play_cards",
+        requestId,
+        seat: authoritativeGame.viewerSeat,
+        cards: cardsToPlay,
+        cardIds: parsedPayload.cardIds,
+        declaredType: parsedPayload.declaredType,
+        baseVersion: authoritativeGame.stateVersion,
+        startedAt: nowMs(),
+      };
+      setOptimisticEffects((current) => [...current, optimisticEffect]);
+      setSelectedCardIds([]);
+
+      let result: PlayerGameStateView | null = null;
+
+      try {
+        result = await submitAction({ actionType, payload, requestId });
+      } finally {
+        setOptimisticEffects((current) =>
+          removeOptimisticEffectByRequestId(current, requestId),
+        );
+        playSubmitInFlightRef.current = false;
+      }
+
+      if (result) {
+        setSelectedCardIds([]);
+        return;
+      }
+
+      void refresh();
+      setSelectedCardIds(parsedPayload.cardIds);
+      return;
+    }
+
+    if (actionType === "PLACE_TRUMP_BID" || actionType === "SKIP_TRUMP_BID") {
+      if (
+        !authoritativeGame ||
+        hasOptimisticEffect(
+          optimisticEffects,
+          (effect) => effect.kind === "slot_message" && Boolean(effect.hidesTrumpActions),
+        ) ||
+        pendingAction ||
+        trumpSubmitInFlightRef.current
+      ) {
+        return;
+      }
+
+      const requestId = crypto.randomUUID();
+      const selectedIdsBeforeSubmit = [...selectedCardIds];
+      const playableBidCards = [
+        ...authoritativeGame.highestTrumpBidCards,
+        ...authoritativeGame.ownHand,
+      ];
+      const response =
+        actionType === "SKIP_TRUMP_BID"
+          ? ({ type: "skipped" } satisfies TrumpBiddingResponse)
+          : (() => {
+              const cardIds = cardIdsPayload(payload);
+
+              if (!cardIds) {
+                return null;
+              }
+
+              const cardIdsForSubmit =
+                authoritativeGame.highestTrumpBid?.seat === authoritativeGame.viewerSeat
+                  ? [...authoritativeGame.highestTrumpBid.cardIds, ...cardIds]
+                  : cardIds;
+              const bidCards = selectedCards(playableBidCards, cardIdsForSubmit);
+
+              if (bidCards.length !== cardIdsForSubmit.length) {
+                return null;
+              }
+
+              return trumpBidResponseFromSelection(authoritativeGame.viewerSeat, bidCards);
+            })();
+
+      if (!response) {
+        return;
+      }
+      const slotMessage = trumpBiddingMessage(response);
+
+      if (!slotMessage) {
+        return;
+      }
+
+      trumpSubmitInFlightRef.current = true;
+      const optimisticEffect: OptimisticGameEffect = {
+        kind: "slot_message",
+        requestId,
+        seat: authoritativeGame.viewerSeat,
+        message: slotMessage,
+        cards: response.type === "bid" ? selectedCards(playableBidCards, response.bid.cardIds) : undefined,
+        hiddenCardIds: response.type === "bid" ? response.bid.cardIds : undefined,
+        hidesTrumpActions: true,
+        restoreSelectedCardIds: selectedIdsBeforeSubmit,
+      };
+      setOptimisticEffects((current) => [...current, optimisticEffect]);
+      setSelectedCardIds([]);
+
+      let result: PlayerGameStateView | null = null;
+
+      try {
+        result = await submitAction({
+          actionType,
+          payload:
+            response.type === "bid"
+              ? {
+                  cardIds: response.bid.cardIds,
+                }
+              : payload,
+          requestId,
+        });
+      } finally {
+        setOptimisticEffects((current) =>
+          removeOptimisticEffectByRequestId(current, requestId),
+        );
+        trumpSubmitInFlightRef.current = false;
+      }
+
+      if (result) {
+        setSelectedCardIds([]);
+        return;
+      }
+
+      if (actionType === "PLACE_TRUMP_BID") {
+        setSelectedCardIds(selectedIdsBeforeSubmit);
+      }
+      return;
+    }
+
     const result = await submitAction({ actionType, payload });
 
     if (result) {
@@ -322,6 +676,12 @@ export function GamePageClient({ roomId, playerToken }: GamePageClientProps) {
 
   const viewerSeat = game.viewerSeat;
   const currentTurnSeat = game.currentTrick?.currentTurnSeat ?? null;
+  const tableCountdownSeats =
+    game.phase === "playing" && currentTurnSeat !== null && currentTurnSeat !== viewerSeat
+      ? [currentTurnSeat]
+      : game.phase === "dealing" || game.phase === "final_trump_bidding"
+        ? pendingTrumpSeats.filter((seat) => seat !== viewerSeat)
+        : [];
   const relativePlayers = buildRelativePlayers({
     roomId,
     viewerSeat,
@@ -331,15 +691,10 @@ export function GamePageClient({ roomId, playerToken }: GamePageClientProps) {
     dealerSeat: game.dealerSeat,
     currentTurnSeat,
   });
-  const displayedTrick = overlayTrick
-    ? {
-        plays: overlayTrick.plays,
-        winnerSeat: overlayTrick.winnerSeat,
-      }
-    : {
-        plays: game.currentTrick?.plays ?? [],
-        winnerSeat: null,
-      };
+  const displayedTrick = {
+    plays: game.currentTrick?.plays ?? [],
+    winnerSeat: null,
+  };
   const trickSlots = buildTrickSlots({
     viewerSeat,
     relativePlayers,
@@ -362,11 +717,17 @@ export function GamePageClient({ roomId, playerToken }: GamePageClientProps) {
     game.allowedActions.returnOptionCardIds ??
     [];
   const missingMarks = buildMissingMarks(game);
+  const slotMessages =
+    game.phase === "waiting_for_players"
+      ? mergeOptimisticSlotMessages(buildReadyMessages(game), optimisticEffects)
+      : mergeOptimisticSlotMessages(buildTrumpBiddingMessages(game), optimisticEffects);
+  const slotCards = {
+    ...buildTrumpBidCards(game),
+    ...optimisticSlotCards(optimisticEffects),
+  };
   const centerHint = centerHintForGame(game, state.players);
-  const roundResultVisible = game.phase === "round_finished" && game.roundResult && !overlayTrick;
+  const roundResultVisible = game.phase === "round_finished" && game.roundResult;
   const tributeLabel = tributeLabelForGame(game);
-  const trumpBidForSeat = (seat: Seat) =>
-    game.highestTrumpBid?.seat === seat ? game.highestTrumpBid : null;
 
   return (
     <main className="h-dvh w-dvw overflow-hidden bg-[#0b3027] text-[#f8fff4]">
@@ -390,7 +751,7 @@ export function GamePageClient({ roomId, playerToken }: GamePageClientProps) {
             player={relativePlayers.top}
             placement="top"
             trumpSuit={game.trumpSuit}
-            trumpBid={trumpBidForSeat(relativePlayers.top.seat)}
+            trumpBid={null}
             missingMarks={missingMarks[relativePlayers.top.seat]}
           />
         </div>
@@ -401,7 +762,7 @@ export function GamePageClient({ roomId, playerToken }: GamePageClientProps) {
               player={relativePlayers.left}
               placement="left"
               trumpSuit={game.trumpSuit}
-              trumpBid={trumpBidForSeat(relativePlayers.left.seat)}
+              trumpBid={null}
               missingMarks={missingMarks[relativePlayers.left.seat]}
             />
           </div>
@@ -411,6 +772,11 @@ export function GamePageClient({ roomId, playerToken }: GamePageClientProps) {
               <CentralTrickArea
                 slots={trickSlots}
                 centerHint={displayedTrick.plays.length === 0 ? centerHint : null}
+                countdownSeats={tableCountdownSeats}
+                countdownSeconds={countdownSeconds}
+                slotMessages={slotMessages}
+                slotCards={slotCards}
+                centerCards={game.pendingBottomCards}
               />
             </div>
             {roundResultVisible && game.roundResult ? (
@@ -426,7 +792,7 @@ export function GamePageClient({ roomId, playerToken }: GamePageClientProps) {
               player={relativePlayers.right}
               placement="right"
               trumpSuit={game.trumpSuit}
-              trumpBid={trumpBidForSeat(relativePlayers.right.seat)}
+              trumpBid={null}
               missingMarks={missingMarks[relativePlayers.right.seat]}
             />
           </div>
@@ -440,6 +806,9 @@ export function GamePageClient({ roomId, playerToken }: GamePageClientProps) {
               selectedIds={selectedIds}
               bidEnabled={canBidTwos(selected)}
               error={error}
+              pendingActionType={pendingAction?.actionType ?? null}
+              trumpActionPending={trumpActionPending}
+              countdownSeconds={countdownSeconds}
               playOptions={playOptions}
               submit={submit}
             />
@@ -545,7 +914,11 @@ function centerHintForGame(
   }
 
   if (game.highestTrumpBid && (game.phase === "dealing" || game.phase === "final_trump_bidding")) {
-    return `当前最高摔 2：${seatName(players, game.highestTrumpBid.seat)} · ${SUIT_LABELS[game.highestTrumpBid.suit]} × ${game.highestTrumpBid.count}`;
+    return "等待玩家摔2";
+  }
+
+  if (game.phase === "dealing" || game.phase === "final_trump_bidding") {
+    return "等待玩家摔2";
   }
 
   if (game.phase === "heavenly_trump_bidding" && game.heavenlyTrumpPrompt) {
@@ -554,6 +927,14 @@ function centerHintForGame(
 
   if (game.phase === "choosing_dealer") {
     return game.dealerSelection ? "获胜方选择坐庄玩家" : "选择坐庄玩家";
+  }
+
+  if (game.phase === "tribute") {
+    return game.tributeView?.status === "returning" ? "等待玩家回贡" : "等待玩家进贡";
+  }
+
+  if (game.phase === "burying_bottom") {
+    return null;
   }
 
   if (game.phase !== "playing") {

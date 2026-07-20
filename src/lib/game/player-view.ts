@@ -15,6 +15,8 @@ import type {
   TrickState,
   TributeState,
   TrumpBid,
+  TrumpBiddingRound,
+  TrumpBiddingResponse,
 } from "./types";
 
 export type PlayerDealerSelectionView = {
@@ -30,6 +32,7 @@ export type PlayerDealerSelectionView = {
 export type AllowedPlayerActions = {
   canChooseDealer: boolean;
   canPlaceTrumpBid: boolean;
+  canSkipTrumpBid: boolean;
   canResolveHeavenlyTrump: boolean;
   canTakeBottom: boolean;
   canBuryBottom: boolean;
@@ -41,6 +44,12 @@ export type AllowedPlayerActions = {
   requiredReturnTaskId?: string;
   tributeCandidateCardIds?: string[];
   returnOptionCardIds?: string[];
+};
+
+export type PlayerTrumpBiddingRoundView = {
+  batchNumber: TrumpBiddingRound["batchNumber"];
+  cardsPerPlayerDealt: TrumpBiddingRound["cardsPerPlayerDealt"];
+  responses: Record<Seat, TrumpBiddingResponse>;
 };
 
 export type PlayerTributeView = {
@@ -75,11 +84,14 @@ export type PlayerGameStateView = {
   ownHand: Card[];
   players: Record<Seat, { seat: Seat; cardCount: number }>;
   highestTrumpBid: TrumpBid | null;
+  highestTrumpBidCards: Card[];
+  trumpBiddingRound: PlayerTrumpBiddingRoundView | null;
   heavenlyTrumpPrompt: {
     seat: Seat;
     suit: StandardSuit;
     resolved: boolean;
   } | null;
+  pendingBottomCards: Card[];
   buriedBottomCards: Card[];
   currentTrick: TrickState | null;
   trickHistory: ResolvedTrick[];
@@ -94,6 +106,7 @@ function emptyAllowedActions(): AllowedPlayerActions {
   return {
     canChooseDealer: false,
     canPlaceTrumpBid: false,
+    canSkipTrumpBid: false,
     canResolveHeavenlyTrump: false,
     canTakeBottom: false,
     canBuryBottom: false,
@@ -146,8 +159,16 @@ function allowedActionsForSeat(
     return actions;
   }
 
-  actions.canPlaceTrumpBid =
+  const ownBiddingResponse = roundState.trumpBiddingRound?.responses[viewerSeat];
+  const isTrumpBiddingPhase =
     roundState.phase === "dealing" || roundState.phase === "final_trump_bidding";
+  const canRaiseOwnBid =
+    roundState.highestTrumpBid?.seat === viewerSeat &&
+    roundState.highestTrumpBid.isHeavenly !== true;
+  actions.canPlaceTrumpBid =
+    isTrumpBiddingPhase &&
+    (ownBiddingResponse?.type === "pending" || canRaiseOwnBid);
+  actions.canSkipTrumpBid = isTrumpBiddingPhase && ownBiddingResponse?.type === "pending";
   actions.canResolveHeavenlyTrump =
     roundState.phase === "heavenly_trump_bidding" &&
     roundState.heavenlyTrumpPrompt?.seat === viewerSeat &&
@@ -198,6 +219,20 @@ function allowedActionsForSeat(
   return actions;
 }
 
+function publicTrumpBiddingRoundView(
+  round: TrumpBiddingRound | null | undefined,
+): PlayerTrumpBiddingRoundView | null {
+  if (!round) {
+    return null;
+  }
+
+  return {
+    batchNumber: round.batchNumber,
+    cardsPerPlayerDealt: round.cardsPerPlayerDealt,
+    responses: round.responses,
+  };
+}
+
 function publicDealerSelectionView(
   state: ServerGameState,
 ): PlayerDealerSelectionView | null {
@@ -224,6 +259,32 @@ function visibleDealerSeat(state: ServerGameState): Seat | null {
   }
 
   return state.roundState?.dealerSeat ?? null;
+}
+
+function highestTrumpBidCards(roundState: {
+  highestTrumpBid: TrumpBid | null;
+  hands: Record<Seat, Card[]>;
+}): Card[] {
+  const bid = roundState.highestTrumpBid;
+
+  if (!bid) {
+    return [];
+  }
+
+  const cardIds = new Set(bid.cardIds);
+  const exactCards = roundState.hands[bid.seat].filter((card) => cardIds.has(card.id));
+
+  if (exactCards.length > 0) {
+    return exactCards;
+  }
+
+  return roundState.hands[bid.seat]
+    .filter((card) => card.rank === "2" && card.originalSuit === bid.suit)
+    .slice(0, bid.isHeavenly ? 1 : bid.count);
+}
+
+function isTrumpBidDisplayedOnTable(phase: GamePhase): boolean {
+  return phase === "dealing" || phase === "final_trump_bidding";
 }
 
 export function createPlayerGameView(
@@ -253,7 +314,10 @@ export function createPlayerGameView(
         3: { seat: 3, cardCount: 0 },
       },
       highestTrumpBid: null,
+      highestTrumpBidCards: [],
+      trumpBiddingRound: null,
       heavenlyTrumpPrompt: null,
+      pendingBottomCards: [],
       buriedBottomCards: [],
       currentTrick: null,
       trickHistory: [],
@@ -265,6 +329,21 @@ export function createPlayerGameView(
     };
   }
 
+  const bidCards = highestTrumpBidCards(roundState);
+  const displayedBidCardIds = new Set(
+    isTrumpBidDisplayedOnTable(roundState.phase) ? bidCards.map((card) => card.id) : [],
+  );
+  const ownHand =
+    roundState.highestTrumpBid?.seat === viewerSeat
+      ? roundState.hands[viewerSeat].filter((card) => !displayedBidCardIds.has(card.id))
+      : [...roundState.hands[viewerSeat]];
+  const cardCountForSeat = (seat: Seat): number => {
+    const hiddenBidCardCount =
+      roundState.highestTrumpBid?.seat === seat ? displayedBidCardIds.size : 0;
+
+    return Math.max(0, roundState.hands[seat].length - hiddenBidCardCount);
+  };
+
   return {
     roomId,
     stateVersion,
@@ -275,14 +354,16 @@ export function createPlayerGameView(
     trumpSuit: roundState.trumpSuit,
     readyState: gameState.readyState,
     ownLeadPrivileges: roundState.playerPrivileges[viewerSeat],
-    ownHand: [...roundState.hands[viewerSeat]],
+    ownHand,
     players: {
-      0: { seat: 0, cardCount: roundState.hands[0].length },
-      1: { seat: 1, cardCount: roundState.hands[1].length },
-      2: { seat: 2, cardCount: roundState.hands[2].length },
-      3: { seat: 3, cardCount: roundState.hands[3].length },
+      0: { seat: 0, cardCount: cardCountForSeat(0) },
+      1: { seat: 1, cardCount: cardCountForSeat(1) },
+      2: { seat: 2, cardCount: cardCountForSeat(2) },
+      3: { seat: 3, cardCount: cardCountForSeat(3) },
     },
     highestTrumpBid: roundState.highestTrumpBid,
+    highestTrumpBidCards: bidCards,
+    trumpBiddingRound: publicTrumpBiddingRoundView(roundState.trumpBiddingRound),
     heavenlyTrumpPrompt: roundState.heavenlyTrumpPrompt
       ? {
           seat: roundState.heavenlyTrumpPrompt.seat,
@@ -290,6 +371,8 @@ export function createPlayerGameView(
           resolved: roundState.heavenlyTrumpPrompt.resolved,
         }
       : null,
+    pendingBottomCards:
+      roundState.phase === "burying_bottom" ? [...roundState.takenBottomCards] : [],
     buriedBottomCards:
       roundState.phase === "playing" || roundState.phase === "round_finished"
         ? [...roundState.bottomCards]

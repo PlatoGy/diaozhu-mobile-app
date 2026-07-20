@@ -57,7 +57,10 @@ class MemoryGameActionStore implements GameActionStore {
         : existing;
     }
 
-    if (input.expectedVersion !== this.stateVersion) {
+    const canMergeReadyAction =
+      input.actionType === "SET_READY" && input.expectedVersion <= this.stateVersion;
+
+    if (input.expectedVersion !== this.stateVersion && !canMergeReadyAction) {
       return {
         ok: false,
         error: {
@@ -309,6 +312,87 @@ async function skipHeavenlyTrumpIfPrompt(
   return expectedVersion + 1;
 }
 
+async function skipPendingTrumpBidsForCurrentRound(
+  store: MemoryGameActionStore,
+  expectedVersion: number,
+): Promise<number> {
+  for (const seat of [0, 1, 2, 3] as const satisfies readonly Seat[]) {
+    const round = store.currentState.roundState;
+    const response = round?.trumpBiddingRound?.responses[seat];
+
+    if (
+      !round ||
+      (round.phase !== "dealing" && round.phase !== "final_trump_bidding") ||
+      response?.type !== "pending"
+    ) {
+      continue;
+    }
+
+    expectOk(
+      await executeGameAction(
+        {
+          roomId: player.roomId,
+          player: playerForSeat(seat),
+          requestId: `skip-trump-bid-${expectedVersion}-${seat}`,
+          expectedVersion,
+          actionType: "SKIP_TRUMP_BID",
+          payload: {},
+        },
+        store,
+      ),
+    );
+    expectedVersion += 1;
+  }
+
+  return expectedVersion;
+}
+
+async function advanceDealingToFinalTrumpBidding(
+  store: MemoryGameActionStore,
+  expectedVersion: number,
+): Promise<number> {
+  for (let guard = 0; guard < 16; guard += 1) {
+    expectedVersion = await skipHeavenlyTrumpIfPrompt(store, expectedVersion);
+
+    const round = store.currentState.roundState;
+
+    if (!round) {
+      throw new Error("Expected round state while dealing");
+    }
+
+    if (round.phase === "final_trump_bidding") {
+      return expectedVersion;
+    }
+
+    if (round.phase === "dealing" && round.trumpBiddingRound) {
+      expectedVersion = await skipPendingTrumpBidsForCurrentRound(store, expectedVersion);
+      continue;
+    }
+
+    if (round.phase === "dealing") {
+      expectOk(
+        await executeGameAction(
+          {
+            roomId: player.roomId,
+            player,
+            requestId: `advance-deal-${expectedVersion}`,
+            expectedVersion,
+            actionType: "DEAL_CARDS",
+            payload: {},
+          },
+          store,
+        ),
+      );
+      expectedVersion += 1;
+      continue;
+    }
+
+    break;
+  }
+
+  throw new Error(`Expected final trump bidding, got ${store.currentState.roundState?.phase}`);
+}
+
 describe("game action service", () => {
   it("increments stateVersion once and returns the original result for duplicate requestId", async () => {
     const store = new MemoryGameActionStore();
@@ -379,6 +463,42 @@ describe("game action service", () => {
     expect(store.stateVersion).toBe(1);
   });
 
+  it("merges stale ready actions because player readiness is independent", async () => {
+    const store = new MemoryGameActionStore();
+
+    expectOk(
+      await executeGameAction(
+        {
+          roomId: player.roomId,
+          player,
+          requestId: "ready-merge-p1",
+          expectedVersion: 0,
+          actionType: "SET_READY",
+          payload: { ready: true },
+        },
+        store,
+      ),
+    );
+
+    const secondReady = expectOk(
+      await executeGameAction(
+        {
+          roomId: player.roomId,
+          player: playerForSeat(1),
+          requestId: "ready-merge-p2",
+          expectedVersion: 0,
+          actionType: "SET_READY",
+          payload: { ready: true },
+        },
+        store,
+      ),
+    );
+
+    expect(secondReady.view.readyState[0]).toBe(true);
+    expect(secondReady.view.readyState[1]).toBe(true);
+    expect(store.stateVersion).toBe(2);
+  });
+
   it("tracks ready state and auto-starts the first dealt round when all seats are ready", async () => {
     const store = new MemoryGameActionStore();
     let expectedVersion = 0;
@@ -428,8 +548,8 @@ describe("game action service", () => {
       2: true,
       3: true,
     });
-    expect(store.currentState.roundState?.hands[0]).toHaveLength(52);
-    expect(store.currentState.roundState?.bottomCards).toHaveLength(8);
+    expect(store.currentState.roundState?.hands[0]).toHaveLength(1);
+    expect(store.currentState.roundState?.bottomCards).toHaveLength(0);
 
     const duplicate = expectOk(
       await executeGameAction(
@@ -507,11 +627,12 @@ describe("game action service", () => {
       ),
     );
 
-    expect(result.view.phase).toBe("final_trump_bidding");
+    expect(result.view.phase).toBe("dealing");
     expect(result.view.highestTrumpBid).toEqual({
       seat: prompt.seat,
       suit: prompt.suit,
       count: 3,
+      cardIds: [prompt.cardId],
       isHeavenly: true,
     });
   });
@@ -557,6 +678,7 @@ describe("game action service", () => {
       seat: 0,
       suit: "spades",
       count: 1,
+      cardIds: [spadeTwo.id],
     });
   });
 
@@ -593,7 +715,7 @@ describe("game action service", () => {
       ),
     );
     expectedVersion += 1;
-    expectedVersion = await skipHeavenlyTrumpIfPrompt(store, expectedVersion);
+    expectedVersion = await advanceDealingToFinalTrumpBidding(store, expectedVersion);
 
     const dealtRound = store.currentState.roundState;
 
@@ -928,7 +1050,7 @@ describe("game action service", () => {
       ),
     );
     expectedVersion += 1;
-    expectedVersion = await skipHeavenlyTrumpIfPrompt(store, expectedVersion);
+    expectedVersion = await advanceDealingToFinalTrumpBidding(store, expectedVersion);
 
     const dealtRound = store.currentState.roundState;
     const bidSeat = ([1, 2, 3] as const).find((seat) =>
@@ -1198,7 +1320,7 @@ describe("game action service", () => {
       expectedVersion += 1;
     }
 
-    expectedVersion = await skipHeavenlyTrumpIfPrompt(store, expectedVersion);
+    expectedVersion = await advanceDealingToFinalTrumpBidding(store, expectedVersion);
 
     const round = store.currentState.roundState;
     const bidCard = round?.hands[0].find(
@@ -1259,5 +1381,91 @@ describe("player game view", () => {
       expect(view.players[3].cardCount).toBe(5);
       expect(JSON.stringify(view)).not.toContain(roundState.hands[((seat + 1) % 4) as Seat][0]?.id ?? "missing");
     }
+  });
+
+  it("keeps current trump bid cards on the table and returns old bid cards after an overbid", () => {
+    const deck = createDeck();
+    const spadeTwo = findDeckCard(0, "spades", "2");
+    const heartTwos = [findDeckCard(0, "hearts", "2"), findDeckCard(1, "hearts", "2")];
+    const roundState = roundWithHands();
+    const hands = createEmptyHands();
+    hands[0] = [spadeTwo, findDeckCard(0, "spades", "A")];
+    hands[1] = [...heartTwos, findDeckCard(0, "hearts", "A")];
+    hands[2] = deck.slice(0, 4);
+    hands[3] = deck.slice(4, 8);
+
+    const firstBidState = stateWithRound({
+      ...roundState,
+      phase: "dealing",
+      hands,
+      highestTrumpBid: {
+        seat: 0,
+        suit: "spades",
+        count: 1,
+        cardIds: [spadeTwo.id],
+      },
+    });
+    const firstBidView = createPlayerGameView(player.roomId, firstBidState, 0, 3);
+
+    expect(firstBidView.highestTrumpBidCards.map((card) => card.id)).toEqual([spadeTwo.id]);
+    expect(firstBidView.ownHand.map((card) => card.id)).not.toContain(spadeTwo.id);
+    expect(firstBidView.players[0].cardCount).toBe(1);
+
+    const overbidState = stateWithRound({
+      ...roundState,
+      phase: "dealing",
+      hands,
+      highestTrumpBid: {
+        seat: 1,
+        suit: "hearts",
+        count: 2,
+        cardIds: heartTwos.map((card) => card.id),
+      },
+    });
+    const returnedView = createPlayerGameView(player.roomId, overbidState, 0, 4);
+
+    expect(returnedView.highestTrumpBidCards.map((card) => card.id)).toEqual(
+      heartTwos.map((card) => card.id),
+    );
+    expect(returnedView.ownHand.map((card) => card.id)).toContain(spadeTwo.id);
+    expect(returnedView.players[0].cardCount).toBe(2);
+    expect(returnedView.players[1].cardCount).toBe(1);
+  });
+
+  it("exposes pending bottom cards only while the dealer is burying bottom", () => {
+    const takenBottomCards = nonPointBottomCards();
+    const buryingView = createPlayerGameView(
+      player.roomId,
+      stateWithRound({
+        ...roundWithHands(),
+        phase: "burying_bottom",
+        takenBottomCards,
+        bottomCards: [],
+      }),
+      1,
+      3,
+    );
+
+    expect(buryingView.pendingBottomCards.map((card) => card.id)).toEqual(
+      takenBottomCards.map((card) => card.id),
+    );
+    expect(buryingView.buriedBottomCards).toEqual([]);
+
+    const playingView = createPlayerGameView(
+      player.roomId,
+      stateWithRound({
+        ...roundWithHands(),
+        phase: "playing",
+        takenBottomCards,
+        bottomCards: takenBottomCards,
+      }),
+      1,
+      4,
+    );
+
+    expect(playingView.pendingBottomCards).toEqual([]);
+    expect(playingView.buriedBottomCards.map((card) => card.id)).toEqual(
+      takenBottomCards.map((card) => card.id),
+    );
   });
 });

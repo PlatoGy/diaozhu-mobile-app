@@ -94,7 +94,7 @@ function withAbsoluteUrls(room: CreatedRoom): DisplayCreatedRoom {
 export function AdminDashboard() {
   const [adminSecret, setAdminSecret] = useState("");
   const [nicknames, setNicknames] = useState(emptyNicknames);
-  const [createdRoom, setCreatedRoom] = useState<DisplayCreatedRoom | null>(null);
+  const [createdRooms, setCreatedRooms] = useState<DisplayCreatedRoom[]>([]);
   const [rooms, setRooms] = useState<RoomListItem[]>([]);
   const [createError, setCreateError] = useState("");
   const [listError, setListError] = useState("");
@@ -153,7 +153,6 @@ export function AdminDashboard() {
   async function createRoom() {
     setCreateError("");
     setCopyMessage("");
-    setCreatedRoom(null);
 
     if (adminSecret.trim().length === 0) {
       setCreateError("请输入管理密码。");
@@ -188,7 +187,7 @@ export function AdminDashboard() {
       }
 
       const room = payload as CreatedRoom;
-      setCreatedRoom(withAbsoluteUrls(room));
+      setCreatedRooms((current) => [withAbsoluteUrls(room), ...current]);
       setNicknames(emptyNicknames);
       await loadRooms();
     } catch {
@@ -224,82 +223,63 @@ export function AdminDashboard() {
     }
   }
 
-  const allLinksText =
-    createdRoom?.players
+  function roomLinksText(room: DisplayCreatedRoom): string {
+    return room.players
       .map((player) => `座位 ${player.seat} ${player.nickname}: ${player.playerUrl}`)
-      .join("\n") ?? "";
+      .join("\n");
+  }
+
+  const allCreatedLinksText = createdRooms
+    .flatMap((room) => [
+      `牌桌 ${room.roomId}`,
+      roomLinksText(room),
+    ])
+    .join("\n\n");
 
   return (
     <main className="min-h-screen bg-[#f7f7f2] text-[#1f2933]">
       <div className="mx-auto flex w-full max-w-5xl flex-col gap-6 px-4 py-5 sm:px-6 lg:px-8">
         <header className="flex flex-col gap-2 border-b border-[#d8d7cf] pb-5">
-          <p className="text-sm font-medium text-[#667085]">4 人固定座位牌桌管理</p>
+          <p className="text-sm font-medium text-[#667085]">吊主Diao Zhu</p>
           <h1 className="text-3xl font-semibold tracking-normal text-[#111827]">
-            在线纸牌游戏管理台
+            牌局生成管理台
           </h1>
         </header>
 
-        <section className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(320px,420px)]">
-          <div className="rounded-lg border border-[#d8d7cf] bg-white p-4 shadow-sm">
-            <div className="flex flex-col gap-4">
-              <div>
-                <label
-                  className="mb-2 block text-sm font-medium text-[#344054]"
-                  htmlFor="admin-secret"
-                >
-                  管理密码
-                </label>
-                <input
-                  id="admin-secret"
-                  type="password"
-                  value={adminSecret}
-                  onChange={(event) => setAdminSecret(event.target.value)}
-                  className="h-11 w-full rounded-md border border-[#c9c8c0] bg-white px-3 text-base outline-none transition focus:border-[#2563eb] focus:ring-2 focus:ring-[#bfdbfe]"
-                  autoComplete="current-password"
-                />
-              </div>
-
-              <div className="grid gap-3 sm:grid-cols-2">
-                {nicknames.map((nickname, index) => (
-                  <div key={index}>
-                    <label
-                      className="mb-2 block text-sm font-medium text-[#344054]"
-                      htmlFor={`nickname-${index}`}
-                    >
-                      座位 {index} 昵称
-                    </label>
-                    <input
-                      id={`nickname-${index}`}
-                      value={nickname}
-                      onChange={(event) => updateNickname(index, event.target.value)}
-                      maxLength={24}
-                      className="h-11 w-full rounded-md border border-[#c9c8c0] bg-white px-3 text-base outline-none transition focus:border-[#2563eb] focus:ring-2 focus:ring-[#bfdbfe]"
-                    />
-                  </div>
-                ))}
-              </div>
-
-              {createError ? (
-                <p className="rounded-md border border-[#fecaca] bg-[#fff1f2] px-3 py-2 text-sm text-[#b42318]">
-                  {createError}
-                </p>
-              ) : null}
-
-              <button
-                type="button"
-                disabled={isCreating}
-                onClick={createRoom}
-                className="h-11 rounded-md bg-[#14532d] px-4 text-base font-medium text-white transition hover:bg-[#166534] disabled:cursor-not-allowed disabled:bg-[#9ca3af]"
+        <section className="rounded-lg border border-[#d8d7cf] bg-white p-4 shadow-sm">
+          <div className="grid gap-3 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-end">
+            <div>
+              <label
+                className="mb-2 block text-sm font-medium text-[#344054]"
+                htmlFor="admin-secret"
               >
-                {isCreating ? "创建中..." : "创建牌桌"}
-              </button>
+                管理密码
+              </label>
+              <input
+                id="admin-secret"
+                type="password"
+                value={adminSecret}
+                onChange={(event) => setAdminSecret(event.target.value)}
+                className="h-11 w-full rounded-md border border-[#c9c8c0] bg-white px-3 text-base outline-none transition focus:border-[#2563eb] focus:ring-2 focus:ring-[#bfdbfe]"
+                autoComplete="current-password"
+              />
             </div>
+            <button
+              type="button"
+              disabled={adminSecret.trim().length === 0 || isLoadingRooms}
+              onClick={loadRooms}
+              className="h-11 rounded-md border border-[#9aa4b2] px-4 text-sm font-medium transition hover:bg-[#f2f4f7] disabled:cursor-not-allowed disabled:text-[#98a2b3]"
+            >
+              {isLoadingRooms ? "查询中" : "查询牌局列表"}
+            </button>
           </div>
+        </section>
 
+        <section className="grid gap-4">
           <div className="rounded-lg border border-[#d8d7cf] bg-white p-4 shadow-sm">
             <div className="flex items-center justify-between gap-3">
               <div>
-                <h2 className="text-lg font-semibold text-[#111827]">已有牌桌</h2>
+                <h2 className="text-lg font-semibold text-[#111827]">牌局列表</h2>
                 <p className="mt-1 text-sm text-[#667085]">列表不会显示玩家专属链接。</p>
               </div>
               <button
@@ -308,7 +288,7 @@ export function AdminDashboard() {
                 onClick={loadRooms}
                 className="h-10 rounded-md border border-[#9aa4b2] px-3 text-sm font-medium transition hover:bg-[#f2f4f7] disabled:cursor-not-allowed disabled:text-[#98a2b3]"
               >
-                {isLoadingRooms ? "读取中" : "刷新"}
+                {isLoadingRooms ? "查询中" : "刷新"}
               </button>
             </div>
 
@@ -377,23 +357,69 @@ export function AdminDashboard() {
           </div>
         </section>
 
-        {createdRoom ? (
+        <section className="rounded-lg border border-[#d8d7cf] bg-white p-4 shadow-sm">
+          <div className="flex flex-col gap-4">
+            <div>
+              <h2 className="text-lg font-semibold text-[#111827]">创建牌局</h2>
+              <p className="mt-1 text-sm text-[#667085]">
+                创建后玩家链接会持续显示在本页面，直到刷新页面。
+              </p>
+            </div>
+
+            <div className="grid gap-3 sm:grid-cols-2">
+              {nicknames.map((nickname, index) => (
+                <div key={index}>
+                  <label
+                    className="mb-2 block text-sm font-medium text-[#344054]"
+                    htmlFor={`nickname-${index}`}
+                  >
+                    座位 {index} 昵称
+                  </label>
+                  <input
+                    id={`nickname-${index}`}
+                    value={nickname}
+                    onChange={(event) => updateNickname(index, event.target.value)}
+                    maxLength={24}
+                    className="h-11 w-full rounded-md border border-[#c9c8c0] bg-white px-3 text-base outline-none transition focus:border-[#2563eb] focus:ring-2 focus:ring-[#bfdbfe]"
+                  />
+                </div>
+              ))}
+            </div>
+
+            {createError ? (
+              <p className="rounded-md border border-[#fecaca] bg-[#fff1f2] px-3 py-2 text-sm text-[#b42318]">
+                {createError}
+              </p>
+            ) : null}
+
+            <button
+              type="button"
+              disabled={isCreating}
+              onClick={createRoom}
+              className="h-11 rounded-md bg-[#14532d] px-4 text-base font-medium text-white transition hover:bg-[#166534] disabled:cursor-not-allowed disabled:bg-[#9ca3af]"
+            >
+              {isCreating ? "创建中..." : "创建牌桌"}
+            </button>
+          </div>
+        </section>
+
+        {createdRooms.length > 0 ? (
           <section className="rounded-lg border border-[#facc15] bg-[#fffbeb] p-4 shadow-sm">
             <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
               <div>
                 <h2 className="text-lg font-semibold text-[#111827]">
-                  已创建牌桌 {createdRoom.roomId}
+                  本次创建的玩家链接
                 </h2>
                 <p className="mt-1 text-sm font-medium text-[#92400e]">
-                  玩家链接只在创建时显示一次，请立即保存或分享。
+                  这些链接会保留到页面重新加载；列表刷新不会清空。
                 </p>
               </div>
               <button
                 type="button"
-                onClick={() => copyText(allLinksText, "全部链接已复制。")}
+                onClick={() => copyText(allCreatedLinksText, "本次创建的全部链接已复制。")}
                 className="h-10 rounded-md bg-[#7c2d12] px-3 text-sm font-medium text-white transition hover:bg-[#9a3412]"
               >
-                全部复制
+                复制全部
               </button>
             </div>
 
@@ -403,28 +429,49 @@ export function AdminDashboard() {
               </p>
             ) : null}
 
-            <div className="mt-4 grid gap-3">
-              {createdRoom.players.map((player) => (
-                <div
-                  key={player.seat}
+            <div className="mt-4 grid gap-4">
+              {createdRooms.map((room) => (
+                <article
+                  key={room.roomId}
                   className="rounded-lg border border-[#fde68a] bg-white p-3"
                 >
-                  <div className="mb-2 flex items-center justify-between gap-3">
-                    <p className="font-medium text-[#111827]">
-                      座位 {player.seat} · {player.nickname}
+                  <div className="mb-3 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+                    <p className="min-w-0 font-medium text-[#111827]">
+                      已创建牌桌 <span className="font-mono text-xs text-[#475467]">{room.roomId}</span>
                     </p>
                     <button
                       type="button"
-                      onClick={() => copyText(player.playerUrl, "链接已复制。")}
+                      onClick={() => copyText(roomLinksText(room), "该牌桌链接已复制。")}
                       className="h-9 rounded-md border border-[#a16207] px-3 text-sm font-medium text-[#854d0e] transition hover:bg-[#fef3c7]"
                     >
-                      复制
+                      复制该牌桌
                     </button>
                   </div>
-                  <p className="break-all rounded-md bg-[#f8fafc] p-2 font-mono text-xs text-[#344054]">
-                    {player.playerUrl}
-                  </p>
-                </div>
+                  <div className="grid gap-3">
+                    {room.players.map((player) => (
+                      <div
+                        key={player.seat}
+                        className="rounded-lg border border-[#fde68a] bg-[#fffcf0] p-3"
+                      >
+                        <div className="mb-2 flex items-center justify-between gap-3">
+                          <p className="font-medium text-[#111827]">
+                            座位 {player.seat} · {player.nickname}
+                          </p>
+                          <button
+                            type="button"
+                            onClick={() => copyText(player.playerUrl, "链接已复制。")}
+                            className="h-9 rounded-md border border-[#a16207] px-3 text-sm font-medium text-[#854d0e] transition hover:bg-[#fef3c7]"
+                          >
+                            复制
+                          </button>
+                        </div>
+                        <p className="break-all rounded-md bg-[#f8fafc] p-2 font-mono text-xs text-[#344054]">
+                          {player.playerUrl}
+                        </p>
+                      </div>
+                    ))}
+                  </div>
+                </article>
               ))}
             </div>
           </section>

@@ -167,26 +167,39 @@ export function MissingSuitsPanel({
   trumpSuit: StandardSuit | null;
 }) {
   if (!trumpSuit) {
-    return <div className="h-[47px] w-[90px]" />;
+    return <div className="h-[58px] w-[82px]" />;
   }
 
-  const categories: Array<{ category: PlayCategory; label: string; colorClassName: string }> = [
-    { category: "trump", label: "主", colorClassName: suitColorClassName(trumpSuit) },
+  const categories: Array<{
+    category: PlayCategory;
+    label: string;
+    colorClassName: string;
+    titleClassName: string;
+  }> = [
+    {
+      category: "trump",
+      label: "主",
+      colorClassName: suitColorClassName(trumpSuit),
+      titleClassName: "text-[9px]",
+    },
     ...STANDARD_SUITS.filter((suit) => suit !== trumpSuit).map((suit) => ({
       category: suit,
       label: SUIT_SYMBOLS[suit],
       colorClassName: suitColorClassName(suit),
+      titleClassName: "text-[18px]",
     })),
   ];
 
   return (
-    <div className="grid w-[90px] grid-cols-4 gap-0.5">
+    <div className="grid w-[82px] grid-cols-4 gap-px">
       {categories.map((item) => (
         <div
           key={item.category}
-          className="grid min-h-[47px] grid-rows-[13px_repeat(3,10px)] gap-px overflow-hidden rounded border border-[#f5d38a]/25 bg-[#051e18]/55"
+          className="grid min-h-[58px] grid-rows-[18px_repeat(3,13px)] gap-px overflow-hidden rounded border border-[#f5d38a]/25 bg-[#051e18]/55"
         >
-          <div className={`grid place-items-center bg-[#fffdf7] text-[9px] font-black leading-none ${item.colorClassName}`}>
+          <div
+            className={`grid place-items-center bg-[#fffdf7] font-black leading-none ${item.titleClassName} ${item.colorClassName}`}
+          >
             {item.label}
           </div>
           {GROUP_MARKS.map((group) => (
@@ -212,7 +225,7 @@ function MissingGroupCell({
   return (
     <div
       className={[
-        "grid place-items-center bg-white/[0.06] text-[8px] leading-none",
+        "grid place-items-center bg-white/[0.06] text-[12px] leading-none",
         missing ? "font-black text-[#ef4444]" : "font-bold text-[#e9ead7]/70",
       ].join(" ")}
     >

@@ -80,7 +80,26 @@ export type TrumpBid = {
   seat: Seat;
   suit: StandardSuit;
   count: 1 | 2 | 3 | 4;
+  cardIds: string[];
   isHeavenly?: true;
+};
+
+export type TrumpBiddingResponse =
+  | {
+      type: "pending";
+    }
+  | {
+      type: "skipped";
+    }
+  | {
+      type: "bid";
+      bid: TrumpBid;
+    };
+
+export type TrumpBiddingRound = {
+  batchNumber: 1 | 2 | 3 | 4;
+  cardsPerPlayerDealt: 1 | 18 | 35 | 52;
+  responses: Record<Seat, TrumpBiddingResponse>;
 };
 
 export type HeavenlyTrumpPrompt = {
@@ -247,6 +266,7 @@ export type RoundState = {
   drawPile: Card[];
   dealOrder: DealOrderItem[];
   highestTrumpBid: TrumpBid | null;
+  trumpBiddingRound?: TrumpBiddingRound | null;
   heavenlyTrumpPrompt: HeavenlyTrumpPrompt | null;
   previousWinnerTeam: Team | null;
   playerPrivileges: PlayerPrivileges;

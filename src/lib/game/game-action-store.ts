@@ -156,7 +156,11 @@ export class NeonGameActionStore implements GameActionStore {
           return databaseError("Room players have an unexpected shape.");
         }
 
-        if (parsedRoom.data.version !== input.expectedVersion) {
+        const canMergeReadyAction =
+          input.actionType === "SET_READY" &&
+          input.expectedVersion <= parsedRoom.data.version;
+
+        if (parsedRoom.data.version !== input.expectedVersion && !canMergeReadyAction) {
           return {
             ok: false,
             error: {

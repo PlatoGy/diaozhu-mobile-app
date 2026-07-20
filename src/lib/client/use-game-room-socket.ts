@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 
-import type { ServerWebSocketMessage } from "../realtime/protocol";
+import type { GameActionType, ServerWebSocketMessage } from "../realtime/protocol";
 
 export type SocketConnectionStatus =
   | "connecting"
@@ -38,8 +38,8 @@ function parseServerMessage(value: string): ServerWebSocketMessage | null {
 export function useGameRoomSocket(input: {
   roomId: string;
   playerToken: string;
-  onStateChanged: (stateVersion: number) => void;
-  onAuthenticated?: () => void;
+  onStateChanged: (stateVersion: number, actionType: GameActionType) => void;
+  onAuthenticated?: (stateVersion: number) => void;
 }) {
   const [status, setStatus] = useState<SocketConnectionStatus>("connecting");
   const socketRef = useRef<WebSocket | null>(null);
@@ -97,12 +97,12 @@ export function useGameRoomSocket(input: {
         if (message.type === "AUTH_OK") {
           reconnectAttemptRef.current = 0;
           setStatus("connected");
-          onAuthenticatedRef.current?.();
+          onAuthenticatedRef.current?.(message.stateVersion);
           return;
         }
 
         if (message.type === "ROOM_STATE_CHANGED") {
-          onStateChangedRef.current(message.stateVersion);
+          onStateChangedRef.current(message.stateVersion, message.actionType);
           return;
         }
 

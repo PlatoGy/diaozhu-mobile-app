@@ -14,13 +14,13 @@ import type {
   StandardSuit,
   Team,
   TrumpBid,
+  TrumpBiddingRound,
+  TrumpBiddingResponse,
 } from "./types";
 
 const SEATS: readonly Seat[] = [0, 1, 2, 3];
 const CARDS_PER_PLAYER = 52;
-const DEALT_CARD_COUNT = CARDS_PER_PLAYER * SEATS.length;
 const BOTTOM_CARD_COUNT = 8;
-const FULL_DECK_CARD_COUNT = 216;
 
 type StartRoundInput = {
   roundNumber: number;
@@ -34,6 +34,7 @@ type StartRoundInput = {
 type PlaceTrumpBidInput = {
   seat: Seat;
   cardIds: string[];
+  hasPendingTribute?: boolean;
 };
 
 type PlaceTrumpBidValue = {
@@ -49,6 +50,15 @@ type ResolveFinalTrumpBiddingInput = {
 type ResolveHeavenlyTrumpInput = {
   seat: Seat;
   accept: boolean;
+};
+
+type DealCardsInput = {
+  hasPendingTribute?: boolean;
+};
+
+type SkipTrumpBidInput = {
+  seat: Seat;
+  hasPendingTribute?: boolean;
 };
 
 type ResolveDealerSelectionInput = {
@@ -129,20 +139,103 @@ function getCardsByIds(cards: readonly Card[], cardIds: readonly string[]): Card
   });
 }
 
-function countCardsBySeat(hands: SeatHands): number {
-  return SEATS.reduce<number>((total, seat) => total + hands[seat].length, 0);
+function cardsPerPlayerDealt(hands: SeatHands): 0 | 1 | 18 | 35 | 52 {
+  const count = hands[0].length;
+
+  if (
+    (count === 0 || count === 1 || count === 18 || count === 35 || count === 52) &&
+    SEATS.every((seat) => hands[seat].length === count)
+  ) {
+    return count;
+  }
+
+  return 0;
 }
 
-function findHeavenlyTrumpPrompt(cards: readonly Card[]): HeavenlyTrumpPrompt | null {
-  for (let index = 0; index < DEALT_CARD_COUNT; index += 1) {
-    const card = cards[index];
+function nextDealCountPerSeat(currentCount: number): 1 | 17 | null {
+  if (currentCount === 0) {
+    return 1;
+  }
+
+  if (currentCount === 1 || currentCount === 18 || currentCount === 35) {
+    return 17;
+  }
+
+  return null;
+}
+
+function batchNumberForCardsPerPlayer(cardsPerPlayer: 1 | 18 | 35 | 52): 1 | 2 | 3 | 4 {
+  if (cardsPerPlayer === 1) {
+    return 1;
+  }
+
+  if (cardsPerPlayer === 18) {
+    return 2;
+  }
+
+  if (cardsPerPlayer === 35) {
+    return 3;
+  }
+
+  return 4;
+}
+
+function emptyTrumpBiddingResponses(): Record<Seat, TrumpBiddingResponse> {
+  return {
+    0: { type: "pending" },
+    1: { type: "pending" },
+    2: { type: "pending" },
+    3: { type: "pending" },
+  };
+}
+
+function createTrumpBiddingRound(input: {
+  cardsPerPlayerDealt: 1 | 18 | 35 | 52;
+  response?: { seat: Seat; response: TrumpBiddingResponse };
+}): TrumpBiddingRound {
+  const responses = emptyTrumpBiddingResponses();
+
+  if (input.response) {
+    responses[input.response.seat] = input.response.response;
+  }
+
+  return {
+    batchNumber: batchNumberForCardsPerPlayer(input.cardsPerPlayerDealt),
+    cardsPerPlayerDealt: input.cardsPerPlayerDealt,
+    responses,
+  };
+}
+
+function biddingRoundWithBid(
+  state: RoundState,
+  bid: TrumpBid,
+): TrumpBiddingRound {
+  const dealtCount = cardsPerPlayerDealt(state.hands);
+
+  return createTrumpBiddingRound({
+    cardsPerPlayerDealt: dealtCount === 52 ? 52 : dealtCount === 35 ? 35 : dealtCount === 18 ? 18 : 1,
+    response: {
+      seat: bid.seat,
+      response: {
+        type: "bid",
+        bid,
+      },
+    },
+  });
+}
+
+function findHeavenlyTrumpPrompt(
+  dealtCards: readonly { seat: Seat; card: Card }[],
+): HeavenlyTrumpPrompt | null {
+  for (const item of dealtCards) {
+    const card = item.card;
 
     if (!card || card.rank !== "2" || card.originalSuit === "joker") {
       continue;
     }
 
     return {
-      seat: SEATS[index % SEATS.length],
+      seat: item.seat,
       cardId: card.id,
       suit: card.originalSuit,
       resolved: false,
@@ -169,6 +262,7 @@ export function startRound(input: StartRoundInput): GameActionResult<RoundState>
     drawPile,
     dealOrder: [],
     highestTrumpBid: null,
+    trumpBiddingRound: null,
     heavenlyTrumpPrompt: null,
     previousWinnerTeam: input.previousWinnerTeam ?? null,
     previousWinningTeam: input.previousWinnerTeam ?? null,
@@ -185,47 +279,104 @@ export function startRound(input: StartRoundInput): GameActionResult<RoundState>
   });
 }
 
-export function dealCards(state: RoundState): GameActionResult<RoundState> {
+export function dealCards(
+  state: RoundState,
+  input: DealCardsInput = {},
+): GameActionResult<RoundState> {
   const phaseResult = assertGamePhase(state.phase, ["dealing"]);
 
   if (!phaseResult.ok) {
     return phaseResult;
   }
 
-  if (
-    state.drawPile.length !== FULL_DECK_CARD_COUNT ||
-    countCardsBySeat(state.hands) !== 0 ||
-    state.bottomCards.length !== 0
-  ) {
+  if (state.trumpBiddingRound) {
+    return err("ROUND_ALREADY_STARTED", "Trump bidding must finish before dealing more cards.");
+  }
+
+  const currentCount = cardsPerPlayerDealt(state.hands);
+  const dealCountPerSeat = nextDealCountPerSeat(currentCount);
+
+  if (!dealCountPerSeat) {
     return err("ROUND_ALREADY_STARTED", "Cards have already been dealt for this round.");
   }
 
-  const hands = createEmptyHands();
+  if (state.bottomCards.length !== 0) {
+    return err("ROUND_ALREADY_STARTED", "Bottom cards have already been assigned.");
+  }
+
+  if (state.drawPile.length < dealCountPerSeat * SEATS.length + BOTTOM_CARD_COUNT) {
+    return err("INVALID_HAND_SIZE", "Not enough cards remain to deal the next batch.");
+  }
+
+  const hands = cloneHands(state.hands);
   const dealOrder: DealOrderItem[] = [];
+  const dealtCards: Array<{ seat: Seat; card: Card }> = [];
 
-  state.drawPile.slice(0, DEALT_CARD_COUNT).forEach((card, index) => {
-    const seat = SEATS[index % SEATS.length];
-    hands[seat].push(card);
-    dealOrder.push({
-      seat,
-      cardId: card.id,
-    });
-  });
+  let drawIndex = 0;
 
-  const bottomCards = state.drawPile.slice(DEALT_CARD_COUNT);
-  const heavenlyTrumpPrompt = findHeavenlyTrumpPrompt(state.drawPile);
+  for (let index = 0; index < dealCountPerSeat; index += 1) {
+    for (const seat of SEATS) {
+      const card = state.drawPile[drawIndex];
 
-  if (bottomCards.length !== BOTTOM_CARD_COUNT) {
+      if (!card) {
+        return err("INVALID_HAND_SIZE", "Draw pile ended before the batch was complete.");
+      }
+
+      hands[seat].push(card);
+      dealOrder.push({
+        seat,
+        cardId: card.id,
+      });
+      dealtCards.push({ seat, card });
+      drawIndex += 1;
+    }
+  }
+
+  const drawPile = state.drawPile.slice(drawIndex);
+  const nextCardsPerPlayer = cardsPerPlayerDealt(hands);
+  const bottomCards = nextCardsPerPlayer === 52 ? drawPile : [];
+  const heavenlyTrumpPrompt =
+    currentCount === 0 ? findHeavenlyTrumpPrompt(dealtCards) : null;
+
+  if (nextCardsPerPlayer === 52 && bottomCards.length !== BOTTOM_CARD_COUNT) {
     return err("INVALID_BOTTOM_SIZE", "Dealing must leave exactly 8 bottom cards.");
+  }
+
+  if (nextCardsPerPlayer !== 1 && nextCardsPerPlayer !== 18 && nextCardsPerPlayer !== 35 && nextCardsPerPlayer !== 52) {
+    return err("INVALID_HAND_SIZE", "Dealing batch produced invalid hand sizes.");
+  }
+
+  if (state.trumpSuit && state.highestTrumpBid) {
+    return ok({
+      ...state,
+      phase: nextCardsPerPlayer === 52
+        ? input.hasPendingTribute
+          ? "tribute"
+          : "taking_bottom"
+        : "dealing",
+      hands,
+      bottomCards,
+      drawPile: nextCardsPerPlayer === 52 ? [] : drawPile,
+      dealOrder: [...state.dealOrder, ...dealOrder],
+      trumpBiddingRound: null,
+      heavenlyTrumpPrompt: null,
+    });
   }
 
   return ok({
     ...state,
-    phase: heavenlyTrumpPrompt ? "heavenly_trump_bidding" : "final_trump_bidding",
+    phase: heavenlyTrumpPrompt
+      ? "heavenly_trump_bidding"
+      : nextCardsPerPlayer === 52
+        ? "final_trump_bidding"
+        : "dealing",
     hands,
     bottomCards,
-    drawPile: [],
-    dealOrder,
+    drawPile: nextCardsPerPlayer === 52 ? [] : drawPile,
+    dealOrder: [...state.dealOrder, ...dealOrder],
+    trumpBiddingRound: heavenlyTrumpPrompt
+      ? null
+      : createTrumpBiddingRound({ cardsPerPlayerDealt: nextCardsPerPlayer }),
     heavenlyTrumpPrompt,
   });
 }
@@ -250,21 +401,39 @@ export function resolveHeavenlyTrump(
     return err("NOT_HEAVENLY_TRUMP_CANDIDATE", "Only the heavenly trump candidate can answer.");
   }
 
+  const heavenlyBid: TrumpBid | null = input.accept
+    ? {
+        seat: prompt.seat,
+        suit: prompt.suit,
+        count: 3,
+        cardIds: [prompt.cardId],
+        isHeavenly: true,
+      }
+    : null;
+  const highestTrumpBid = heavenlyBid ?? state.highestTrumpBid;
+  const dealtCount = cardsPerPlayerDealt(state.hands);
+  const cardsPerPlayer = dealtCount === 1 ? 1 : dealtCount === 18 ? 18 : dealtCount === 35 ? 35 : 52;
+
   return ok({
     ...state,
-    phase: "final_trump_bidding",
+    phase: cardsPerPlayer === 52 ? "final_trump_bidding" : "dealing",
     heavenlyTrumpPrompt: {
       ...prompt,
       resolved: true,
     },
-    highestTrumpBid: input.accept
-      ? {
-          seat: prompt.seat,
-          suit: prompt.suit,
-          count: 3,
-          isHeavenly: true,
-        }
-      : state.highestTrumpBid,
+    highestTrumpBid,
+    trumpBiddingRound: createTrumpBiddingRound({
+      cardsPerPlayerDealt: cardsPerPlayer,
+      response: {
+        seat: prompt.seat,
+        response: heavenlyBid
+          ? {
+              type: "bid",
+              bid: heavenlyBid,
+            }
+          : { type: "skipped" },
+      },
+    }),
   });
 }
 
@@ -351,6 +520,7 @@ export function placeTrumpBid(
     seat: input.seat,
     suit: validation.value.suit,
     count: validation.value.count,
+    cardIds: validation.value.cards.map((card) => card.id),
   };
 
   if (currentBid) {
@@ -376,13 +546,108 @@ export function placeTrumpBid(
   const nextState = {
     ...state,
     highestTrumpBid: nextBid,
+    trumpBiddingRound: biddingRoundWithBid(state, nextBid),
   };
+  const resolvedState =
+    nextBid.count === 4
+      ? lockedTrumpState(nextState, nextBid, {
+          hasPendingTribute: input.hasPendingTribute,
+        })
+      : nextState;
 
   return ok({
-    state: nextState,
+    state: resolvedState,
     highestTrumpBid: nextBid,
     shouldResetFinalBidTimer: state.phase === "final_trump_bidding",
   });
+}
+
+function allTrumpBiddingResponsesDone(round: TrumpBiddingRound): boolean {
+  return SEATS.every((seat) => round.responses[seat].type !== "pending");
+}
+
+function lockedTrumpState(
+  state: RoundState,
+  bid: TrumpBid,
+  input: {
+    hasPendingTribute?: boolean;
+  } = {},
+): RoundState {
+  const cardsPerPlayer = cardsPerPlayerDealt(state.hands);
+  const nextPhase: GamePhase =
+    cardsPerPlayer === 52
+      ? input.hasPendingTribute
+        ? "tribute"
+        : "taking_bottom"
+      : "dealing";
+
+  return {
+    ...state,
+    dealerSeat: state.roundNumber === 1 ? bid.seat : (state.dealerSeat ?? bid.seat),
+    trumpSuit: bid.suit,
+    phase: nextPhase,
+    trumpBiddingRound: null,
+  };
+}
+
+export function skipTrumpBid(
+  state: RoundState,
+  input: SkipTrumpBidInput,
+): GameActionResult<RoundState> {
+  const phaseResult = assertGamePhase(state.phase, ["dealing", "final_trump_bidding"]);
+
+  if (!phaseResult.ok) {
+    return phaseResult;
+  }
+
+  const dealtCount = cardsPerPlayerDealt(state.hands);
+  const cardsPerPlayer = dealtCount === 52 ? 52 : dealtCount === 35 ? 35 : dealtCount === 18 ? 18 : 1;
+  const currentRound =
+    state.trumpBiddingRound ?? createTrumpBiddingRound({ cardsPerPlayerDealt: cardsPerPlayer });
+
+  if (currentRound.responses[input.seat].type === "bid") {
+    return err("INVALID_PHASE", "A player who already bid in this round cannot skip it.");
+  }
+
+  const nextRound: TrumpBiddingRound = {
+    ...currentRound,
+    responses: {
+      ...currentRound.responses,
+      [input.seat]: { type: "skipped" },
+    },
+  };
+  const nextState: RoundState = {
+    ...state,
+    trumpBiddingRound: nextRound,
+  };
+
+  if (!allTrumpBiddingResponsesDone(nextRound)) {
+    return ok(nextState);
+  }
+
+  if (cardsPerPlayer < 52) {
+    return dealCards(
+      {
+        ...nextState,
+        phase: "dealing",
+        trumpBiddingRound: null,
+      },
+      {
+        hasPendingTribute: input.hasPendingTribute,
+      },
+    );
+  }
+
+  return resolveFinalTrumpBidding(
+    {
+      ...nextState,
+      phase: "final_trump_bidding",
+      trumpBiddingRound: null,
+    },
+    {
+      hasPendingTribute: input.hasPendingTribute,
+    },
+  );
 }
 
 export function determineTrumpFromBottom(
@@ -422,6 +687,7 @@ export function resolveFinalTrumpBidding(
           : (state.dealerSeat ?? state.highestTrumpBid.seat),
       trumpSuit: state.highestTrumpBid.suit,
       phase: nextPhase,
+      trumpBiddingRound: null,
     });
   }
 
@@ -436,6 +702,7 @@ export function resolveFinalTrumpBidding(
     dealerSeat: state.roundNumber === 1 ? (state.dealerSeat ?? 0) : state.dealerSeat,
     trumpSuit: trumpResult.value,
     phase: nextPhase,
+    trumpBiddingRound: null,
   });
 }
 

@@ -9,7 +9,7 @@ const GAME_PHASE_LABELS: Record<GamePhase, string> = {
   choosing_dealer: "选庄",
   dealing: "发牌",
   heavenly_trump_bidding: "天摔",
-  final_trump_bidding: "等待定主",
+  final_trump_bidding: "等待摔2",
   tribute: "进贡",
   taking_bottom: "拿底",
   burying_bottom: "扣底",
