@@ -24,3 +24,38 @@ body {
   color: var(--foreground);
   font-family: Arial, Helvetica, sans-serif;
 }
+
+@media (min-width: 1024px) and (orientation: landscape) {
+  .game-table-section {
+    grid-template-columns: clamp(140px, 9.5vw, 190px) minmax(0, 1fr) clamp(140px, 9.5vw, 190px);
+  }
+
+  .game-table-wrap {
+    padding-top: clamp(2px, 0.5vh, 8px);
+    padding-right: clamp(20px, 3vw, 64px);
+    padding-left: clamp(20px, 3vw, 64px);
+  }
+
+  .game-table-frame {
+    height: min(67dvh, 720px);
+    max-width: min(84dvw, 1720px);
+  }
+
+  .game-action-anchor {
+    left: calc(50% + 8px);
+    top: auto;
+    bottom: clamp(132px, 18dvh, 220px);
+    transform: translateX(-50%);
+  }
+}
+
+@media (min-width: 1600px) and (orientation: landscape) {
+  .game-table-frame {
+    height: min(68dvh, 740px);
+    max-width: min(82dvw, 1760px);
+  }
+
+  .game-action-anchor {
+    bottom: clamp(150px, 18.5dvh, 232px);
+  }
+}
