@@ -1,5 +1,6 @@
 import { z } from "zod";
 
+import { GAME_PHASES } from "./constants";
 import { createInitialGameState } from "./initial-state";
 import { jsonObjectSchema, jsonValueSchema } from "./json-schema";
 import type { JsonObject, JsonValue, Seat, ServerGameState } from "./types";
@@ -26,7 +27,8 @@ const privateStateBySeatSchema = z
 
 const partialServerStateSchema = z
   .object({
-    phase: z.string().optional(),
+    phase: z.enum(GAME_PHASES).optional(),
+    schemaVersion: z.number().int().positive().optional(),
     currentSeat: seatSchema.nullable().optional(),
     roundNumber: z.number().int().nonnegative().optional(),
     publicState: jsonObjectSchema.optional(),
@@ -52,9 +54,11 @@ export function normalizeServerGameState(value: unknown): ServerGameState {
   }
 
   return {
+    schemaVersion: parsed.data.schemaVersion ?? initialState.schemaVersion,
     phase: parsed.data.phase ?? initialState.phase,
     currentSeat: parsed.data.currentSeat ?? initialState.currentSeat,
     roundNumber: parsed.data.roundNumber ?? initialState.roundNumber,
+    readyState: initialState.readyState,
     publicState: parsed.data.publicState ?? initialState.publicState,
     privateStateBySeat: {
       0: privateStateForSeat(parsed.data.privateStateBySeat, 0),

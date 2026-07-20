@@ -5,8 +5,9 @@ import { jsonValueSchema } from "../game/json-schema";
 export const gameActionRequestSchema = z
   .object({
     actionType: z.string().trim().min(1).max(64),
-    payload: jsonValueSchema,
-    expectedVersion: z.number().int().positive(),
+    requestId: z.string().trim().min(8).max(128),
+    payload: jsonValueSchema.optional().default({}),
+    expectedVersion: z.number().int().nonnegative(),
   })
   .strict();
 

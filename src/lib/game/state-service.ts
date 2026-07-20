@@ -6,8 +6,9 @@ import {
   resolvePlayerAccess,
   type PlayerAccessFailureReason,
 } from "./player-auth";
-import { toPlayerView } from "./state";
-import type { JsonValue, RoomStatus, Seat } from "./types";
+import { parsePersistedGameState } from "./game-state-schema";
+import { createPlayerGameView, type PlayerGameStateView } from "./player-view";
+import type { RoomStatus, Seat } from "./types";
 
 export type PlayerStateResponse = {
   room: {
@@ -24,13 +25,7 @@ export type PlayerStateResponse = {
     seat: Seat;
     nickname: string;
   }>;
-  game: {
-    phase: string;
-    currentSeat: Seat | null;
-    publicState: JsonValue;
-    myPrivateState: JsonValue;
-    actions: JsonValue[];
-  };
+  game: PlayerGameStateView;
 };
 
 export type PlayerStateResult =
@@ -40,14 +35,14 @@ export type PlayerStateResult =
     }
   | {
       ok: false;
-      reason: PlayerAccessFailureReason;
+      reason: PlayerAccessFailureReason | "invalid_persisted_state";
     };
 
 const seatSchema = z.union([z.literal(0), z.literal(1), z.literal(2), z.literal(3)]);
 const dbPositiveIntegerSchema = z
   .union([z.number(), z.string().regex(/^\d+$/)])
   .transform((value) => Number(value))
-  .pipe(z.number().int().positive());
+  .pipe(z.number().int().nonnegative());
 
 const roomStateRowSchema = z.object({
   id: z.uuid(),
@@ -112,7 +107,21 @@ export async function getPlayerStateForToken(
     };
   }
 
-  const game = toPlayerView(parsedRow.data.current_state, access.player.seat);
+  const gameState = parsePersistedGameState(parsedRow.data.current_state);
+
+  if (!gameState) {
+    return {
+      ok: false,
+      reason: "invalid_persisted_state",
+    };
+  }
+
+  const game = createPlayerGameView(
+    parsedRow.data.id,
+    gameState,
+    access.player.seat,
+    parsedRow.data.version,
+  );
 
   return {
     ok: true,

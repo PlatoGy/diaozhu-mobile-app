@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useState } from "react";
 
 type Seat = 0 | 1 | 2 | 3;
 
@@ -103,11 +103,6 @@ export function AdminDashboard() {
   const [isLoadingRooms, setIsLoadingRooms] = useState(false);
   const [deletingRoomId, setDeletingRoomId] = useState<string | null>(null);
 
-  const canSubmit = useMemo(
-    () => adminSecret.trim().length > 0 && nicknames.every((name) => name.trim().length > 0),
-    [adminSecret, nicknames],
-  );
-
   function updateNickname(index: number, value: string) {
     setNicknames((current) =>
       current.map((nickname, currentIndex) =>
@@ -159,6 +154,19 @@ export function AdminDashboard() {
     setCreateError("");
     setCopyMessage("");
     setCreatedRoom(null);
+
+    if (adminSecret.trim().length === 0) {
+      setCreateError("请输入管理密码。");
+      return;
+    }
+
+    const firstMissingNicknameIndex = nicknames.findIndex((nickname) => nickname.trim().length === 0);
+
+    if (firstMissingNicknameIndex !== -1) {
+      setCreateError(`请输入座位 ${firstMissingNicknameIndex} 的昵称。`);
+      return;
+    }
+
     setIsCreating(true);
 
     try {
@@ -279,7 +287,7 @@ export function AdminDashboard() {
 
               <button
                 type="button"
-                disabled={!canSubmit || isCreating}
+                disabled={isCreating}
                 onClick={createRoom}
                 className="h-11 rounded-md bg-[#14532d] px-4 text-base font-medium text-white transition hover:bg-[#166534] disabled:cursor-not-allowed disabled:bg-[#9ca3af]"
               >

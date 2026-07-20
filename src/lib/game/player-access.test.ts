@@ -60,7 +60,7 @@ function createFakeQueryable(includeRoomA = true): {
       roundNumber: 0,
       version: 1,
       currentState: {
-        phase: "waiting",
+        phase: "waiting_for_players",
         currentSeat: null,
         roundNumber: 0,
         publicState: {
@@ -243,7 +243,7 @@ describe("player-visible state", () => {
   it("does not include other seats' private state", () => {
     const view = toPlayerView(
       {
-        phase: "waiting",
+        phase: "waiting_for_players",
         currentSeat: null,
         roundNumber: 0,
         publicState: { table: "public" },

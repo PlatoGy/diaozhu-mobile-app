@@ -129,7 +129,7 @@ export async function POST(
     const rows = await sql`
       with new_room as (
         insert into rooms (status, round_number, current_state, version)
-        values ('waiting', 0, ${JSON.stringify(initialState)}::jsonb, 1)
+        values ('waiting', 0, ${JSON.stringify(initialState)}::jsonb, 0)
         returning id
       ),
       new_players as (
