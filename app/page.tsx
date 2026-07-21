@@ -1,5 +1,5 @@
-import { AdminDashboard } from "@/src/components/admin/AdminDashboard";
+import { JoinRoomPage } from "@/src/components/home/JoinRoomPage";
 
 export default function Home() {
-  return <AdminDashboard />;
+  return <JoinRoomPage />;
 }

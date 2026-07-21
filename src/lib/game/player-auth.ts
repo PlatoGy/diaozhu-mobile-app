@@ -1,6 +1,7 @@
 import { z } from "zod";
 
 import { hashPlayerToken } from "../auth/player-token";
+import { roomCodeFromJoinCode } from "../validation/join-code";
 import { roomIdSchema } from "../validation/rooms";
 
 import type { GameQueryable } from "./queryable";
@@ -72,14 +73,15 @@ export async function resolvePlayer(
   }
 
   const tokenHash = hashPlayerToken(rawToken);
+  const joinCode = roomCodeFromJoinCode(rawToken) ? rawToken : null;
   const rows = await queryable.query(
     `
       select id, room_id, seat, nickname
       from room_players
-      where room_id = $1 and token_hash = $2
+      where room_id = $1 and (token_hash = $2 or join_code = $3)
       limit 1
     `,
-    [parsedRoomId.data, tokenHash],
+    [parsedRoomId.data, tokenHash, joinCode],
   );
   const parsedRow = playerRowSchema.safeParse(rows[0]);
 

@@ -7,16 +7,19 @@ type Seat = 0 | 1 | 2 | 3;
 type CreatedRoomPlayer = {
   seat: Seat;
   nickname: string;
+  joinCode: string;
   playerPath: string;
 };
 
 type CreatedRoom = {
   roomId: string;
+  roomCode: string;
   players: CreatedRoomPlayer[];
 };
 
 type DisplayCreatedRoom = {
   roomId: string;
+  roomCode: string;
   players: (CreatedRoomPlayer & {
     playerUrl: string;
   })[];
@@ -25,10 +28,12 @@ type DisplayCreatedRoom = {
 type RoomListPlayer = {
   seat: Seat;
   nickname: string;
+  joinCode: string | null;
 };
 
 type RoomListItem = {
   id: string;
+  roomCode: string | null;
   status: string;
   roundNumber: number;
   createdAt: string;
@@ -84,6 +89,7 @@ function withAbsoluteUrls(room: CreatedRoom): DisplayCreatedRoom {
 
   return {
     roomId: room.roomId,
+    roomCode: room.roomCode,
     players: room.players.map((player) => ({
       ...player,
       playerUrl: new URL(player.playerPath, origin).toString(),
@@ -118,7 +124,7 @@ export function AdminDashboard() {
       await navigator.clipboard.writeText(text);
       setCopyMessage(successMessage);
     } catch {
-      setCopyMessage("复制失败，请手动选择链接复制。");
+      setCopyMessage("复制失败，请手动选择内容复制。");
     }
   }
 
@@ -162,7 +168,7 @@ export function AdminDashboard() {
     const firstMissingNicknameIndex = nicknames.findIndex((nickname) => nickname.trim().length === 0);
 
     if (firstMissingNicknameIndex !== -1) {
-      setCreateError(`请输入座位 ${firstMissingNicknameIndex} 的昵称。`);
+      setCreateError(`请输入座位 ${firstMissingNicknameIndex + 1} 的昵称。`);
       return;
     }
 
@@ -225,13 +231,16 @@ export function AdminDashboard() {
 
   function roomLinksText(room: DisplayCreatedRoom): string {
     return room.players
-      .map((player) => `座位 ${player.seat} ${player.nickname}: ${player.playerUrl}`)
+      .map(
+        (player) =>
+          `座位 ${player.seat + 1} ${player.nickname}: ${player.joinCode} ${player.playerUrl}`,
+      )
       .join("\n");
   }
 
   const allCreatedLinksText = createdRooms
     .flatMap((room) => [
-      `牌桌 ${room.roomId}`,
+      `牌桌 ${room.roomCode} (${room.roomId})`,
       roomLinksText(room),
     ])
     .join("\n\n");
@@ -244,6 +253,7 @@ export function AdminDashboard() {
           <h1 className="text-3xl font-semibold tracking-normal text-[#111827]">
             牌局生成管理台
           </h1>
+          <p className="text-sm text-[#667085]">玩家入口在首页，管理台地址为 /manage。</p>
         </header>
 
         <section className="rounded-lg border border-[#d8d7cf] bg-white p-4 shadow-sm">
@@ -280,7 +290,7 @@ export function AdminDashboard() {
             <div className="flex items-center justify-between gap-3">
               <div>
                 <h2 className="text-lg font-semibold text-[#111827]">牌局列表</h2>
-                <p className="mt-1 text-sm text-[#667085]">列表不会显示玩家专属链接。</p>
+                <p className="mt-1 text-sm text-[#667085]">列表会显示五位房间号，方便重新分享给玩家。</p>
               </div>
               <button
                 type="button"
@@ -312,7 +322,10 @@ export function AdminDashboard() {
                 >
                   <div className="flex items-start justify-between gap-3">
                     <div className="min-w-0">
-                      <p className="truncate font-mono text-xs text-[#475467]">{room.id}</p>
+                      <p className="text-2xl font-black text-[#111827]">
+                        房号 {room.roomCode ?? "未生成"}
+                      </p>
+                      <p className="mt-1 truncate font-mono text-xs text-[#475467]">{room.id}</p>
                       <div className="mt-2 flex flex-wrap gap-2 text-xs">
                         <span className="rounded-md bg-[#e0f2fe] px-2 py-1 text-[#075985]">
                           {room.status}
@@ -341,7 +354,8 @@ export function AdminDashboard() {
                             key={player.seat}
                             className="rounded-md border border-[#d0d5dd] bg-white px-2 py-1"
                           >
-                            座位 {player.seat}: {player.nickname}
+                            座位 {player.seat + 1}: {player.nickname}
+                            {player.joinCode ? ` · ${player.joinCode}` : ""}
                           </span>
                         ))}
                       </dd>
@@ -362,7 +376,7 @@ export function AdminDashboard() {
             <div>
               <h2 className="text-lg font-semibold text-[#111827]">创建牌局</h2>
               <p className="mt-1 text-sm text-[#667085]">
-                创建后玩家链接会持续显示在本页面，直到刷新页面。
+                创建后会生成四个五位房间号，前四位相同，最后一位代表座位 1-4。
               </p>
             </div>
 
@@ -373,7 +387,7 @@ export function AdminDashboard() {
                     className="mb-2 block text-sm font-medium text-[#344054]"
                     htmlFor={`nickname-${index}`}
                   >
-                    座位 {index} 昵称
+                    座位 {index + 1} 昵称
                   </label>
                   <input
                     id={`nickname-${index}`}
@@ -408,15 +422,15 @@ export function AdminDashboard() {
             <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
               <div>
                 <h2 className="text-lg font-semibold text-[#111827]">
-                  本次创建的玩家链接
+                  本次创建的房间号
                 </h2>
                 <p className="mt-1 text-sm font-medium text-[#92400e]">
-                  这些链接会保留到页面重新加载；列表刷新不会清空。
+                  五位码可从牌局列表恢复；链接也会保留到页面重新加载。
                 </p>
               </div>
               <button
                 type="button"
-                onClick={() => copyText(allCreatedLinksText, "本次创建的全部链接已复制。")}
+                onClick={() => copyText(allCreatedLinksText, "本次创建的全部房间号已复制。")}
                 className="h-10 rounded-md bg-[#7c2d12] px-3 text-sm font-medium text-white transition hover:bg-[#9a3412]"
               >
                 复制全部
@@ -437,11 +451,12 @@ export function AdminDashboard() {
                 >
                   <div className="mb-3 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
                     <p className="min-w-0 font-medium text-[#111827]">
-                      已创建牌桌 <span className="font-mono text-xs text-[#475467]">{room.roomId}</span>
+                      已创建房号 <span className="font-mono text-2xl font-black text-[#111827]">{room.roomCode}</span>
+                      <span className="ml-2 font-mono text-xs text-[#475467]">{room.roomId}</span>
                     </p>
                     <button
                       type="button"
-                      onClick={() => copyText(roomLinksText(room), "该牌桌链接已复制。")}
+                      onClick={() => copyText(roomLinksText(room), "该牌桌房间号已复制。")}
                       className="h-9 rounded-md border border-[#a16207] px-3 text-sm font-medium text-[#854d0e] transition hover:bg-[#fef3c7]"
                     >
                       复制该牌桌
@@ -455,18 +470,21 @@ export function AdminDashboard() {
                       >
                         <div className="mb-2 flex items-center justify-between gap-3">
                           <p className="font-medium text-[#111827]">
-                            座位 {player.seat} · {player.nickname}
+                            座位 {player.seat + 1} · {player.nickname}
                           </p>
                           <button
                             type="button"
-                            onClick={() => copyText(player.playerUrl, "链接已复制。")}
+                            onClick={() => copyText(player.joinCode, "房间号已复制。")}
                             className="h-9 rounded-md border border-[#a16207] px-3 text-sm font-medium text-[#854d0e] transition hover:bg-[#fef3c7]"
                           >
-                            复制
+                            复制房号
                           </button>
                         </div>
-                        <p className="break-all rounded-md bg-[#f8fafc] p-2 font-mono text-xs text-[#344054]">
-                          {player.playerUrl}
+                        <p className="rounded-md bg-[#f8fafc] p-2 font-mono text-2xl font-black text-[#111827]">
+                          {player.joinCode}
+                        </p>
+                        <p className="mt-2 break-all rounded-md bg-[#f8fafc] p-2 font-mono text-xs text-[#344054]">
+                          备用链接：{player.playerUrl}
                         </p>
                       </div>
                     ))}

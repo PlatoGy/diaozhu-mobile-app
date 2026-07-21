@@ -18,6 +18,7 @@ type FakePlayer = {
   seat: Seat;
   nickname: string;
   tokenHash: string;
+  joinCode: string;
 };
 
 type FakeRoom = {
@@ -93,6 +94,7 @@ function createFakeQueryable(includeRoomA = true): {
       seat: 0,
       nickname: "Alice",
       tokenHash: hashPlayerToken(tokensBySeat[0]),
+      joinCode: "12341",
     },
     {
       id: playerIdForSeat(1),
@@ -100,6 +102,7 @@ function createFakeQueryable(includeRoomA = true): {
       seat: 1,
       nickname: "Bob",
       tokenHash: hashPlayerToken(tokensBySeat[1]),
+      joinCode: "12342",
     },
     {
       id: playerIdForSeat(2),
@@ -107,6 +110,7 @@ function createFakeQueryable(includeRoomA = true): {
       seat: 2,
       nickname: "Carol",
       tokenHash: hashPlayerToken(tokensBySeat[2]),
+      joinCode: "12343",
     },
     {
       id: playerIdForSeat(3),
@@ -114,6 +118,7 @@ function createFakeQueryable(includeRoomA = true): {
       seat: 3,
       nickname: "Dave",
       tokenHash: hashPlayerToken(tokensBySeat[3]),
+      joinCode: "12344",
     },
     {
       id: "f2c5342f-ee6f-4d9c-9702-28665b26e9b8",
@@ -121,6 +126,7 @@ function createFakeQueryable(includeRoomA = true): {
       seat: 0,
       nickname: "Other",
       tokenHash: hashPlayerToken(roomBToken),
+      joinCode: "56781",
     },
   ];
 
@@ -136,10 +142,11 @@ function createFakeQueryable(includeRoomA = true): {
       if (queryText.includes("from room_players")) {
         const roomId = String(params[0]);
         const tokenHash = String(params[1]);
+        const joinCode = typeof params[2] === "string" ? params[2] : null;
         const player = players.find(
           (candidate) =>
             candidate.roomId === roomId &&
-            candidate.tokenHash === tokenHash &&
+            (candidate.tokenHash === tokenHash || candidate.joinCode === joinCode) &&
             rooms.has(candidate.roomId),
         );
 
@@ -211,6 +218,32 @@ describe("player access", () => {
   it("rejects a wrong token", async () => {
     const { queryable } = createFakeQueryable();
     const result = await resolvePlayerAccess(roomAId, "wrong-token", queryable);
+
+    expect(result).toEqual({
+      ok: false,
+      reason: "invalid_token",
+    });
+  });
+
+  it("resolves five-digit join codes to fixed player seats", async () => {
+    const { queryable } = createFakeQueryable();
+
+    await Promise.all(
+      ([0, 1, 2, 3] as Seat[]).map(async (seat) => {
+        const result = await resolvePlayerAccess(roomAId, `1234${seat + 1}`, queryable);
+
+        expect(result.ok).toBe(true);
+
+        if (result.ok) {
+          expect(result.player.seat).toBe(seat);
+        }
+      }),
+    );
+  });
+
+  it("rejects another room's five-digit join code", async () => {
+    const { queryable } = createFakeQueryable();
+    const result = await resolvePlayerAccess(roomAId, "56781", queryable);
 
     expect(result).toEqual({
       ok: false,

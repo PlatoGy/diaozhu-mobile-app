@@ -49,6 +49,8 @@ POST /api/game/[roomId]/action
 }
 ```
 
+`playerToken` 可以是旧版玩家专属 token，也可以是新版五位房间号。五位房间号前四位为房号，最后一位为玩家座位号 1-4。
+
 成功返回：
 
 ```ts
